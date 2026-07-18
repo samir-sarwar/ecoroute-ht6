@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [ -n "${PYTHON:-}" ]; then
+  python_bin="$PYTHON"
+elif [ -x .venv/bin/python ]; then
+  python_bin=.venv/bin/python
+else
+  if command -v python3.12 >/dev/null 2>&1; then
+    bootstrap_python=python3.12
+  else
+    bootstrap_python=python3
+  fi
+  "$bootstrap_python" - <<'PY'
+import sys
+if sys.version_info < (3, 12):
+    raise SystemExit("EcoRoute requires Python 3.12+; install python3.12 or set PYTHON.")
+PY
+  "$bootstrap_python" -m venv .venv
+  python_bin=.venv/bin/python
+fi
+
+"$python_bin" - <<'PY'
+import sys
+if sys.version_info < (3, 12):
+    raise SystemExit("EcoRoute requires Python 3.12+.")
+PY
+"$python_bin" -m pip install -r requirements-dev.lock
+pnpm install --frozen-lockfile
+pnpm --filter @ecoroute/control-center exec playwright install chromium

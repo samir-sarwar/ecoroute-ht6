@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+BASE_URL="${ECOROUTE_PUBLIC_URL:-http://localhost:8000}"
+KEY="${ECOROUTE_GATEWAY_KEY:-ecoroute-demo-key}"
+tmp_dir="$(mktemp -d)"
+trap 'rm -rf "$tmp_dir"' EXIT
+
+curl --fail --silent --show-error \
+  -H "Authorization: Bearer ${KEY}" \
+  -H 'Content-Type: application/json' \
+  "${BASE_URL}/api/v1/reports/impact-framework" \
+  -d '{}' \
+  -o "$tmp_dir/ecoroute-impact.yml"
+
+pnpm exec if-run --manifest "$tmp_dir/ecoroute-impact.yml" --no-output
+echo 'Impact Framework manifest is re-runnable with @grnsft/if 1.1.1.'

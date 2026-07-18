@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+repo_root="$(dirname "$script_dir")"
+limactl shell ecoroute-kernel-lab sudo "$repo_root/scripts/kernel-lab-guest" demo "$repo_root"
