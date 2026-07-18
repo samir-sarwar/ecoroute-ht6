@@ -33,8 +33,9 @@ from __future__ import annotations
 
 import json
 import random
+import re
 import sys
-from collections import Counter
+from collections import Counter, defaultdict
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -318,6 +319,38 @@ def gen_out_of_domain(n: int) -> list[dict]:
     return out
 
 
+# --- template-signature recovery (for decontaminated, split-by-template) --------
+_PREF = sorted((p.lower() for p in PREFIXES if p), key=len, reverse=True)
+_SUF = sorted((s.lower() for s in SUFFIXES if s), key=len, reverse=True)
+_ITEMS = sorted((i.lower() for i in ITEMS), key=len, reverse=True)
+
+
+def signature(inp: str) -> str:
+    """Reconstruct the base template of an example by stripping the varied parts
+    (greeting prefix, polite suffix, item, numbers). Two examples from the same
+    base template collapse to the same signature -> we can split by template so
+    no near-duplicate leaks across train/eval/test (avoids inflated eval)."""
+    s = inp.lower().strip()
+    for p in _PREF:
+        if s.startswith(p):
+            s = s[len(p):]
+            break
+    for suf in _SUF:
+        if s.endswith(suf):
+            s = s[: -len(suf)]
+            break
+    for it in _ITEMS:
+        s = s.replace(it, "ITEM")
+    s = re.sub(r"\d+", "N", s)
+    return s.strip()
+
+
+def category_of(ex: dict) -> tuple:
+    """Coarse category so template holdout keeps every category in every split."""
+    out = json.loads(ex["output"])
+    return (ex["metadata"]["task_type"], tuple(sorted(out["policy_ids"])))
+
+
 def mk(question, answer, confidence, policy_ids, needs_human, task_type, difficulty) -> dict:
     output = {
         "answer": answer,
@@ -372,18 +405,44 @@ def main() -> None:
     print(f"  empty-policy examples: {empty} ({empty/len(examples):.0%}), "
           f"needs_human: {esc} ({esc/len(examples):.0%})")
 
-    random.shuffle(examples)
-    n = len(examples)
-    n_eval = int(n * 0.10)
-    n_test = int(n * 0.10)
-    splits = {
-        "eval": examples[:n_eval],
-        "test": examples[n_eval:n_eval + n_test],
-        "train": examples[n_eval + n_test:],
-    }
+    # Split by TEMPLATE, per category, so eval/test measure generalization to
+    # phrasings never seen in training (no near-duplicate leakage). Within each
+    # category, hold out 1 template for test and 1 for eval; the rest are train.
+    by_cat_sig: dict[tuple, dict[str, list]] = defaultdict(lambda: defaultdict(list))
+    for ex in examples:
+        by_cat_sig[category_of(ex)][signature(ex["input"])].append(ex)
+
+    train, eval_, test = [], [], []
+    for cat, sig_map in by_cat_sig.items():
+        sigs = list(sig_map)
+        random.shuffle(sigs)
+        held_test = sigs[0:1]
+        held_eval = sigs[1:2] if len(sigs) >= 3 else []
+        for sig in sigs:
+            if sig in held_test:
+                test += sig_map[sig]
+            elif sig in held_eval:
+                eval_ += sig_map[sig]
+            else:
+                train += sig_map[sig]
+
+    for split in (train, eval_, test):
+        random.shuffle(split)
+
+    # Sanity: assert zero template overlap across splits.
+    tr_sigs = {signature(e["input"]) for e in train}
+    leak = [e for e in eval_ + test if signature(e["input"]) in tr_sigs]
+    print(f"template-overlap leaks across splits: {len(leak)} (must be 0)")
+    if leak:
+        raise SystemExit("Template leak detected; refusing to write.")
+
+    print("Per-split category coverage (categories represented):")
+    for name, rows in [("train", train), ("eval", eval_), ("test", test)]:
+        cats = len({category_of(e) for e in rows})
+        print(f"  {name}: {len(rows)} examples across {cats} categories")
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    for name, rows in splits.items():
+    for name, rows in [("train", train), ("eval", eval_), ("test", test)]:
         path = OUT_DIR / f"{name}.jsonl"
         with path.open("w", encoding="utf-8") as fh:
             for ex in rows:

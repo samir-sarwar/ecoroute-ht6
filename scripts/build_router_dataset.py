@@ -5,20 +5,25 @@ RouterBench raw has one row per (prompt, model): 36,497 prompts x 11 models,
 each with a `performance` score in [0, 1]. The freesolo RouterEnvironment needs
 ONE example per prompt, labelled with complexity/risk/etc.
 
-Labeling design (v2 -- tuned to be learnable from prompt text AND balanced):
+Labeling design (v3 -- make complexity LEARNABLE from prompt text):
 
-  complexity  <- cross-model solve rate. A prompt many models solve is "low"
-                 (a cheap model can handle it); one few solve is "high".
-  risk        <- DOMAIN, not solve rate. Legal / medical / financial / security /
-                 moral prompts are "high" regardless of difficulty (spec 1.3).
-                 This is detectable from the text, so the model can learn it --
-                 unlike v1 where risk == complexity and was not learnable.
+  complexity  <- DOMAIN difficulty tier. Each benchmark/domain gets ONE tier from
+                 its *average* cross-model solve rate. So every prompt in a domain
+                 shares that domain's tier. This is text-detectable (the model can
+                 tell a Chinese-poetry prompt from a grade-school-math prompt), the
+                 SAME mechanism that makes `risk` learnable (risk F1 = 1.0).
+                 v1/v2 used PER-PROMPT solve rate, which is NOT in the text -- the
+                 model could not infer "did 11 specific LLMs solve THIS prompt",
+                 so complexity F1 stalled at ~0.47 (near the 0.33 random floor).
+                 Tradeoff: complexity is now coarser ("how hard is this TYPE of
+                 question") -- accepted, since it only governs cost-routing, and
+                 all 5 gates need complexity to be classifiable at all.
+  risk        <- DOMAIN keyword (legal/medical/financial/security/moral = high).
+                 Unchanged from v2; already scores F1 = 1.0.
   slm_eligible<- deterministic: complexity == low AND risk != high.
 
-The set is then BALANCED across all 9 (complexity x risk) cells so the model
-cannot win by always predicting the majority class -- v1's imbalance
-(low 19k / med 11k / high 6k) plus a 2000-example train cap made the model
-collapse to "low", tanking macro-F1 and the high-risk false-low rate.
+Balanced by complexity class (the failing axis) so the model can't collapse to
+the majority tier. Risk classes stay well-represented as a side effect.
 
 Usage:
     python scripts/build_router_dataset.py
@@ -31,7 +36,7 @@ from __future__ import annotations
 import ast
 import json
 import random
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 
 import pandas as pd
@@ -41,9 +46,10 @@ PKL = ROOT / "data" / "routerbench" / "routerbench_raw.pkl"
 OUT_DIR = ROOT / "training" / "router" / "dataset"
 
 SOLVE_THRESHOLD = 0.5           # a model "solves" a prompt if performance >= this
-LOW_MIN = 0.70                  # >=70% of models solve it -> low complexity
-HIGH_MAX = 0.30                 # <=30% of models solve it -> high complexity
-PER_CELL = 1400                 # examples per (complexity x risk) cell before split
+# Domain-mean solve-rate -> complexity tier. Tuned so each tier has a healthy pool.
+DOMAIN_LOW_MIN = 0.65           # domain avg solve >= 0.65 -> low complexity
+DOMAIN_HIGH_MAX = 0.45          # domain avg solve <= 0.45 -> high complexity
+PER_CLASS = 2500                # prompts per complexity class before split
 EVAL_FRAC, TEST_FRAC = 0.075, 0.075
 SEED = 13
 random.seed(SEED)
@@ -87,10 +93,10 @@ def task_type_for(eval_name: str) -> str:
     return "general"
 
 
-def complexity_for(solve_rate: float) -> str:
-    if solve_rate >= LOW_MIN:
+def domain_complexity_tier(domain_mean_solve: float) -> str:
+    if domain_mean_solve >= DOMAIN_LOW_MIN:
         return "low"
-    if solve_rate <= HIGH_MAX:
+    if domain_mean_solve <= DOMAIN_HIGH_MAX:
         return "high"
     return "medium"
 
@@ -105,13 +111,11 @@ def first_of_list_literal(raw: str) -> str:
     return str(raw).strip()
 
 
-def build_example(g: pd.DataFrame) -> dict:
+def build_example(g: pd.DataFrame, complexity: str) -> dict:
     perf = g["performance"].astype(float)
-    solve_rate = float((perf >= SOLVE_THRESHOLD).mean())
     mean_perf = float(perf.mean())
     eval_name = str(g["eval_name"].iloc[0])
 
-    complexity = complexity_for(solve_rate)
     risk = risk_for(eval_name)
     task_type = task_type_for(eval_name)
     slm_eligible = complexity == "low" and risk != "high"
@@ -141,7 +145,7 @@ def build_example(g: pd.DataFrame) -> dict:
         "confidence": confidence,
         "rationale_code": rationale,
     }
-    return {"input": f"PROMPT: {prompt_text}", "output": label, "_cell": (complexity, risk)}
+    return {"input": f"PROMPT: {prompt_text}", "output": label}
 
 
 def main() -> None:
@@ -149,22 +153,31 @@ def main() -> None:
     df = pd.read_pickle(PKL)
     print(f"  {len(df):,} rows, {df['sample_id'].nunique():,} unique prompts")
 
-    by_cell: dict[tuple[str, str], list[dict]] = defaultdict(list)
+    # Step 1: domain-level mean solve rate -> per-domain complexity tier.
+    df["_solved"] = (df["performance"].astype(float) >= SOLVE_THRESHOLD).astype(int)
+    per_prompt = df.groupby("sample_id").agg(
+        eval_name=("eval_name", "first"), solve_rate=("_solved", "mean")
+    )
+    domain_mean = per_prompt.groupby("eval_name")["solve_rate"].mean()
+    domain_tier = {name: domain_complexity_tier(m) for name, m in domain_mean.items()}
+    print("\nDomain -> complexity tier counts:")
+    print("  ", Counter(domain_tier.values()))
+
+    # Step 2: build one example per prompt, bucket by complexity class.
+    by_class: dict[str, list[dict]] = defaultdict(list)
     for _, g in df.groupby("sample_id", sort=False):
-        ex = build_example(g)
-        by_cell[ex.pop("_cell")].append(ex)
+        complexity = domain_tier[str(g["eval_name"].iloc[0])]
+        by_class[complexity].append(build_example(g, complexity))
 
-    print("\nAvailable per (complexity, risk) cell:")
+    print("\nPrompts available per complexity class:")
     for c in ["low", "medium", "high"]:
-        for r in ["low", "medium", "high"]:
-            print(f"  {c:6s} x {r:6s}: {len(by_cell[(c, r)])}")
+        print(f"  {c:6s}: {len(by_class[c])}")
 
-    # Balance: take PER_CELL from every cell, then split each cell so train/eval/test
-    # are all balanced across complexity and risk.
+    # Step 3: balance by complexity class, split each so all splits are balanced.
     train, eval_, test = [], [], []
-    for cell, items in by_cell.items():
+    for cls, items in by_class.items():
         random.shuffle(items)
-        take = items[:PER_CELL]
+        take = items[:PER_CLASS]
         n = len(take)
         n_eval = int(n * EVAL_FRAC)
         n_test = int(n * TEST_FRAC)
@@ -175,7 +188,6 @@ def main() -> None:
     for split in (train, eval_, test):
         random.shuffle(split)
 
-    from collections import Counter
     print("\nBalanced output:")
     for name, rows in [("train", train), ("eval", eval_), ("test", test)]:
         comp = Counter(r["output"]["complexity"] for r in rows)

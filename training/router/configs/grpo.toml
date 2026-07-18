@@ -15,5 +15,5 @@ group_size = 4
 temperature = 0.7
 max_completion_tokens = 256
 max_context_tokens = 4096
-init_from_adapter = "flash-1784356709-fa15655a"
+init_from_adapter = "flash-1784392297-e2a42199"
 structured_outputs = "json_object"

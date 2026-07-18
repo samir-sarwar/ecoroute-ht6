@@ -12,9 +12,8 @@ from the environment if already exported. The key is never printed or logged.
 
 Usage (from WSL, venv active):
     # put FREESOLO_API_KEY=your-key in .env at the repo root, then:
-    python scripts/eval_deployment.py router          # samples 200 (cheap first look)
-    python scripts/eval_deployment.py router 500       # sample 500
-    python scripts/eval_deployment.py router all       # full test set (slow, costs more)
+    python scripts/eval_deployment.py router          # FULL test set (trustworthy verdict)
+    python scripts/eval_deployment.py router 200       # sample 200 (cheap first look)
     python scripts/eval_deployment.py support
 """
 
@@ -37,13 +36,16 @@ BASE_URL = "https://clado-ai--freesolo-lora-serving.modal.run/v1"
 TARGETS = {
     "router": {
         "env_dir": ROOT / "training" / "router",
-        "model": "flash-1784363093-11b9c8e6",   # retrained GRPO (balanced + domain risk)
+        # SFT-only on the domain-tier dataset. GRPO (flash-1784395194) collapsed
+        # entropy -- SFT already saturated reward (~0.99), leaving GRPO no gradient,
+        # so it overfit to one output family and failed deploy. SFT-only is clean.
+        "model": "flash-1784392297-e2a42199",
     },
     "support": {
         "env_dir": ROOT / "training" / "support-slm",
-        # SFT model (stable). The OPD/RL pass at epochs=2 collapsed into repetition
-        # loops (proven via raw-output diagnostic); SFT on the same data is clean.
-        "model": "flash-1784358680-5d650133",
+        # SFT on the template-decontaminated split (no near-duplicate leakage
+        # between train/eval/test) -- this eval number is the trustworthy one.
+        "model": "flash-1784393778-a0fbce92",
     },
 }
 
@@ -213,7 +215,10 @@ def main() -> None:
     if len(sys.argv) < 2 or sys.argv[1] not in TARGETS:
         raise SystemExit("usage: python scripts/eval_deployment.py {router|support} [N|all]")
     target = sys.argv[1]
-    limit_arg = sys.argv[2] if len(sys.argv) > 2 else "200"
+    # Default to the FULL held-out test set for a trustworthy gate verdict --
+    # a small sample swings several points on luck alone (know your noise floor).
+    # Pass an integer to sample a subset for a quick, cheaper check.
+    limit_arg = sys.argv[2] if len(sys.argv) > 2 else "all"
     cfg = TARGETS[target]
 
     api_key = os.environ.get("FREESOLO_API_KEY")
