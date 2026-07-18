@@ -95,6 +95,11 @@ async def seed() -> None:
                 "key": "support-slm",
                 "name": "demo-support-slm",
                 "quality_tier": "specialized",
+                "provider": "fake",
+                "base_url": "http://gateway:8000/_internal/fake/v1",
+                "credential_ref": None,
+                "physical_model": "demo-support-slm",
+                "azure_deployment_type": None,
                 "region": "demo-local",
                 "grid_zone": "demo-local",
                 "input_price": "0.10",
@@ -110,6 +115,11 @@ async def seed() -> None:
                 "key": "small",
                 "name": "demo-small",
                 "quality_tier": "small",
+                "provider": "fake",
+                "base_url": "http://gateway:8000/_internal/fake/v1",
+                "credential_ref": None,
+                "physical_model": "demo-small",
+                "azure_deployment_type": None,
                 "region": "demo-local",
                 "grid_zone": "demo-local",
                 "input_price": "0.20",
@@ -125,7 +135,12 @@ async def seed() -> None:
                 "key": "frontier-local",
                 "name": "demo-frontier-local",
                 "quality_tier": "frontier",
-                "region": "demo-local",
+                "provider": "azure_openai",
+                "base_url": "https://ecoroute-demo-ca.openai.azure.com/openai/v1",
+                "credential_ref": "env:AZURE_OPENAI_DEMO_KEY",
+                "physical_model": "demo-gpt-frontier-canada",
+                "azure_deployment_type": "standard",
+                "region": "canada-central",
                 "grid_zone": "demo-local",
                 "input_price": "2.00",
                 "output_price": "8.00",
@@ -140,7 +155,12 @@ async def seed() -> None:
                 "key": "frontier-remote",
                 "name": "demo-frontier-remote",
                 "quality_tier": "frontier",
-                "region": "demo-remote",
+                "provider": "azure_openai",
+                "base_url": "https://ecoroute-demo-se.openai.azure.com/openai/v1",
+                "credential_ref": "env:AZURE_OPENAI_DEMO_KEY",
+                "physical_model": "demo-gpt-frontier-sweden",
+                "azure_deployment_type": "standard",
+                "region": "sweden-central",
                 "grid_zone": "demo-remote",
                 "input_price": "2.00",
                 "output_price": "8.00",
@@ -160,10 +180,11 @@ async def seed() -> None:
                     id=fixture_id(f"endpoint:{spec['key']}"),
                     workspace_id=workspace.id,
                     name=spec["name"],
-                    provider="fake",
-                    base_url="http://gateway:8000/_internal/fake/v1",
-                    credential_ref=None,
-                    physical_model=spec["name"],
+                    provider=spec["provider"],
+                    base_url=spec["base_url"],
+                    credential_ref=spec["credential_ref"],
+                    physical_model=spec["physical_model"],
+                    azure_deployment_type=spec["azure_deployment_type"],
                     region=spec["region"],
                     grid_zone=spec["grid_zone"],
                     grid_lookup_mode="zone",
@@ -187,6 +208,17 @@ async def seed() -> None:
                     coefficient_version="demo-v1",
                 )
                 session.add(endpoint)
+            # Reconcile stable fixture rows so an existing demo database picks up
+            # Azure-shaped regional routes after an upgrade.
+            endpoint.provider = spec["provider"]
+            endpoint.base_url = spec["base_url"]
+            endpoint.credential_ref = spec["credential_ref"]
+            endpoint.physical_model = spec["physical_model"]
+            endpoint.azure_deployment_type = spec["azure_deployment_type"]
+            endpoint.region = spec["region"]
+            endpoint.grid_zone = spec["grid_zone"]
+            endpoint.processing_location_evidence = "simulated"
+            endpoint.grid_attribution = "simulated"
             endpoints.append(endpoint)
         await session.flush()
 

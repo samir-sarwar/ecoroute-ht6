@@ -1004,6 +1004,7 @@ function EndpointsView() {
       baseUrl: data.get("baseUrl"),
       credentialRef: data.get("credentialRef") || null,
       physicalModel: data.get("physicalModel"),
+      azureDeploymentType: data.get("azureDeploymentType") || null,
       region: data.get("region"),
       gridZone: data.get("gridZone"),
       gridLookupMode: data.get("gridLookupMode"),
@@ -1054,6 +1055,7 @@ function EndpointsView() {
         baseUrl: data.get("baseUrl"),
         credentialRef: data.get("credentialRef") || null,
         physicalModel: data.get("physicalModel"),
+        azureDeploymentType: data.get("azureDeploymentType") || null,
         region: data.get("region"),
         gridZone: data.get("gridZone"),
         gridLookupMode: data.get("gridLookupMode"),
@@ -1148,6 +1150,7 @@ function EndpointsView() {
             <Field label="Provider">
               <select name="provider">
                 {[
+                  "azure_openai",
                   "freesolo",
                   "gemini",
                   "openai",
@@ -1162,6 +1165,18 @@ function EndpointsView() {
             </Field>
             <Field label="Physical model">
               <input required name="physicalModel" />
+            </Field>
+            <Field
+              label="Azure deployment type"
+              hint="Required for Azure. Global and Data Zone deployments are intentionally excluded."
+            >
+              <select name="azureDeploymentType" defaultValue="">
+                <option value="">Not Azure</option>
+                <option value="standard">Standard (regional)</option>
+                <option value="provisioned_managed">
+                  Provisioned Managed (regional)
+                </option>
+              </select>
             </Field>
             <Field label="Base URL">
               <input
@@ -1421,7 +1436,12 @@ function EndpointsView() {
                     <td>
                       <strong>{item.name}</strong>
                     </td>
-                    <td>{item.provider}</td>
+                    <td>
+                      {item.provider}
+                      {item.azureDeploymentType
+                        ? ` · ${item.azureDeploymentType}`
+                        : ""}
+                    </td>
                     <td>{item.physicalModel}</td>
                     <td>{item.region}</td>
                     <td>{item.gridAttribution ?? "unknown"}</td>
@@ -1523,6 +1543,7 @@ function EndpointsView() {
             <Field label="Provider">
               <select name="provider" defaultValue={editingEndpoint.provider}>
                 {[
+                  "azure_openai",
                   "freesolo",
                   "gemini",
                   "openai",
@@ -1541,6 +1562,21 @@ function EndpointsView() {
                 name="physicalModel"
                 defaultValue={editingEndpoint.physicalModel}
               />
+            </Field>
+            <Field
+              label="Azure deployment type"
+              hint="Only single-region Standard or Provisioned Managed deployments qualify."
+            >
+              <select
+                name="azureDeploymentType"
+                defaultValue={editingEndpoint.azureDeploymentType ?? ""}
+              >
+                <option value="">Not Azure</option>
+                <option value="standard">Standard (regional)</option>
+                <option value="provisioned_managed">
+                  Provisioned Managed (regional)
+                </option>
+              </select>
             </Field>
             <Field label="Base URL">
               <input

@@ -66,6 +66,7 @@ class ModelEndpoint(Base, TimestampMixin):
     base_url: Mapped[str] = mapped_column(Text)
     credential_ref: Mapped[str | None] = mapped_column(String(200))
     physical_model: Mapped[str] = mapped_column(String(300))
+    azure_deployment_type: Mapped[str | None] = mapped_column(String(40))
     region: Mapped[str] = mapped_column(String(100))
     grid_zone: Mapped[str] = mapped_column(String(100), index=True)
     grid_lookup_mode: Mapped[str] = mapped_column(String(20), default="zone")

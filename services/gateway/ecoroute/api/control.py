@@ -361,6 +361,7 @@ def _endpoint_json(endpoint: ModelEndpoint) -> dict[str, Any]:
         "baseUrl": endpoint.base_url,
         "credentialRef": endpoint.credential_ref,
         "physicalModel": endpoint.physical_model,
+        "azureDeploymentType": endpoint.azure_deployment_type,
         "region": endpoint.region,
         "gridZone": endpoint.grid_zone,
         "gridLookupMode": endpoint.grid_lookup_mode,
@@ -785,6 +786,7 @@ async def patch_endpoint(
         "baseUrl": endpoint.base_url,
         "credentialRef": endpoint.credential_ref,
         "physicalModel": endpoint.physical_model,
+        "azureDeploymentType": endpoint.azure_deployment_type,
         "region": endpoint.region,
         "gridZone": endpoint.grid_zone,
         "gridLookupMode": endpoint.grid_lookup_mode,
@@ -904,6 +906,7 @@ async def test_endpoint(
         "carbonAccountingAvailable": carbon_available,
         "gridAttribution": endpoint.grid_attribution,
         "processingLocationEvidence": endpoint.processing_location_evidence,
+        "azureDeploymentType": endpoint.azure_deployment_type,
     }
 
 

@@ -222,6 +222,57 @@ def test_openai_provider_contract_requires_matching_regional_endpoint() -> None:
         ModelEndpointCreate.model_validate(payload)
 
 
+def test_azure_openai_requires_official_single_region_deployment_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ECOROUTE_DEMO_MODE", "false")
+    payload = endpoint_payload("https://canada.openai.azure.com/openai/v1")
+    payload.update(
+        {
+            "provider": "azure_openai",
+            "credentialRef": "env:AZURE_OPENAI_CANADA_KEY",
+            "physicalModel": "gpt-deployment-canada",
+            "azureDeploymentType": "standard",
+            "region": "canada-central",
+            "gridZone": "CA-ON",
+            "processingLocationEvidence": "provider_contract",
+            "gridAttribution": "regional_proxy",
+        }
+    )
+
+    value = ModelEndpointCreate.model_validate(payload)
+    assert value.azure_deployment_type == "standard"
+
+    payload["baseUrl"] = "https://example.com/openai/v1"
+    with pytest.raises(ValidationError, match="official HTTPS resource URL"):
+        ModelEndpointCreate.model_validate(payload)
+
+    payload["baseUrl"] = "https://canada.openai.azure.com/openai/v1"
+    payload["azureDeploymentType"] = "global_standard"
+    with pytest.raises(ValidationError, match="standard.*provisioned_managed"):
+        ModelEndpointCreate.model_validate(payload)
+
+
+def test_azure_simulated_location_is_demo_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    payload = endpoint_payload("https://demo.openai.azure.com/openai/v1")
+    payload.update(
+        {
+            "provider": "azure_openai",
+            "credentialRef": "env:AZURE_OPENAI_DEMO_KEY",
+            "azureDeploymentType": "standard",
+            "processingLocationEvidence": "simulated",
+            "gridAttribution": "simulated",
+        }
+    )
+    monkeypatch.setenv("ECOROUTE_DEMO_MODE", "false")
+    with pytest.raises(ValidationError, match="provider-contract"):
+        ModelEndpointCreate.model_validate(payload)
+
+    monkeypatch.setenv("ECOROUTE_DEMO_MODE", "true")
+    value = ModelEndpointCreate.model_validate(payload)
+    assert value.processing_location_evidence == "simulated"
+
+
 def test_data_center_grid_lookup_requires_complete_electricity_maps_mapping() -> None:
     payload = endpoint_payload("https://example.com/v1")
     payload.update(

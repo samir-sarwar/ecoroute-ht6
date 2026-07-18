@@ -219,10 +219,20 @@ class RoutingPolicyConfig(ApiModel):
 
 class ModelEndpointCreate(ApiModel):
     name: str = Field(min_length=1, max_length=200)
-    provider: Literal["freesolo", "gemini", "openai", "ollama", "vllm", "openai_compatible", "fake"]
+    provider: Literal[
+        "azure_openai",
+        "freesolo",
+        "gemini",
+        "openai",
+        "ollama",
+        "vllm",
+        "openai_compatible",
+        "fake",
+    ]
     base_url: str
     credential_ref: str | None = Field(None, max_length=200)
     physical_model: str = Field(min_length=1, max_length=300)
+    azure_deployment_type: Literal["standard", "provisioned_managed"] | None = None
     region: str = Field(min_length=1, max_length=100)
     grid_zone: str = Field(min_length=1, max_length=100)
     grid_lookup_mode: Literal["zone", "data_center"] = "zone"
@@ -310,6 +320,42 @@ class ModelEndpointCreate(ApiModel):
                     "OpenAI provider-contract location evidence requires a matching "
                     "US or EU regional API hostname"
                 )
+        if self.provider == "azure_openai":
+            parsed = urlparse(self.base_url)
+            hostname = (parsed.hostname or "").casefold()
+            if (
+                parsed.scheme != "https"
+                or not hostname.endswith((".openai.azure.com", ".services.ai.azure.com"))
+                or parsed.path.rstrip("/") != "/openai/v1"
+            ):
+                raise ValueError(
+                    "Azure OpenAI endpoints require an official HTTPS resource URL ending "
+                    "in /openai/v1"
+                )
+            if self.azure_deployment_type not in {"standard", "provisioned_managed"}:
+                raise ValueError(
+                    "Azure regional routing requires a Standard or regional Provisioned "
+                    "Managed deployment"
+                )
+            if not self.credential_ref:
+                raise ValueError("Azure OpenAI endpoints require credentialRef")
+            if self.self_hosted:
+                raise ValueError("Azure OpenAI endpoints cannot be marked selfHosted")
+            demo_mode = os.getenv("ECOROUTE_DEMO_MODE", "false").casefold() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }
+            if self.processing_location_evidence != "provider_contract" and not (
+                demo_mode and self.processing_location_evidence == "simulated"
+            ):
+                raise ValueError(
+                    "Azure regional endpoints require provider-contract processing-location "
+                    "evidence"
+                )
+        elif self.azure_deployment_type is not None:
+            raise ValueError("azureDeploymentType requires provider=azure_openai")
         if self.concurrency_target > self.baseline_concurrency:
             raise ValueError("concurrencyTarget cannot exceed baselineConcurrency")
         if self.node_agent_id is not None and not self.self_hosted:
@@ -379,6 +425,7 @@ class CandidateSnapshot(BaseModel):
     latency_p95_ms: int
     evidence: EvidenceLevel
     region: str | None = None
+    azure_deployment_type: Literal["standard", "provisioned_managed"] | None = None
     grid_zone: str | None = None
     carbon_evidence: EvidenceLevel | None = None
     processing_location_evidence: ProcessingLocationEvidence = "unknown"

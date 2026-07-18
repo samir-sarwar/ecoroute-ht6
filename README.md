@@ -63,8 +63,7 @@ docker compose down
 
 ## Real Linux kernel-control demo
 
-On an Apple-silicon Mac with at least 15 GB free, run the real cgroup-v2 benchmark in a Lima Ubuntu
-VM:
+Run the real cgroup-v2 benchmark in a Lima Ubuntu VM on Apple silicon:
 
 ```bash
 ./scripts/kernel-lab-up
@@ -74,6 +73,10 @@ VM:
 This path measures real Linux latency, throughput, process CPU time, cgroup application, PID
 placement, throttling, and rollback. VM hardware energy remains explicitly unavailable. See the
 [kernel lab runbook](docs/kernel-lab.md) for setup, evidence boundaries, and the demo claim.
+
+On Windows 11, use WSL2 Ubuntu and run `./scripts/kernel-lab-wsl up` followed by
+`./scripts/kernel-lab-wsl demo`. See the [Windows runbook](docs/kernel-lab-windows.md) for the
+one-time WSL setup and the optional PowerShell wrapper.
 
 The root `compose.yaml` includes the canonical `infra/compose.yaml`, so root commands and test
 automation share one service definition instead of duplicated Compose files. `make

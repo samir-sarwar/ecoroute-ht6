@@ -41,11 +41,66 @@ endpoint_id() {
     | head -n 1
 }
 
+install_docker_engine() {
+  if command -v dockerd >/dev/null 2>&1 && \
+    docker compose version >/dev/null 2>&1 && \
+    systemctl cat docker.service >/dev/null 2>&1; then
+    systemctl enable --now docker
+    return
+  fi
+
+  echo "Installing Docker Engine and the Compose plugin from Docker's Ubuntu repository..."
+  install -m 0755 -d /etc/apt/keyrings
+  curl --fail --silent --show-error --location \
+    https://download.docker.com/linux/ubuntu/gpg \
+    -o /etc/apt/keyrings/docker.asc
+  chmod a+r /etc/apt/keyrings/docker.asc
+
+  # shellcheck disable=SC1091
+  . /etc/os-release
+  local ubuntu_codename="${UBUNTU_CODENAME:-${VERSION_CODENAME:-}}"
+  if [[ "$ID" != "ubuntu" || -z "$ubuntu_codename" ]]; then
+    echo "Automatic Docker installation currently supports Ubuntu only." >&2
+    exit 1
+  fi
+  printf '%s\n' \
+    "Types: deb" \
+    "URIs: https://download.docker.com/linux/ubuntu" \
+    "Suites: $ubuntu_codename" \
+    "Components: stable" \
+    "Architectures: $(dpkg --print-architecture)" \
+    "Signed-By: /etc/apt/keyrings/docker.asc" \
+    >/etc/apt/sources.list.d/docker.sources
+
+  apt-get update
+  if ! apt-get install --no-install-recommends -y \
+    docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin; then
+    echo "Docker installation failed. Remove conflicting distro Docker packages, then rerun." >&2
+    echo "See https://docs.docker.com/engine/install/ubuntu/#uninstall-old-versions" >&2
+    exit 1
+  fi
+  systemctl enable --now docker
+}
+
+verify_kernel_host() {
+  if [[ "$(ps -p 1 -o comm= | tr -d '[:space:]')" != "systemd" ]]; then
+    echo "systemd must be PID 1 for the real kernel lab." >&2
+    exit 1
+  fi
+  if [[ ! -f /sys/fs/cgroup/cgroup.controllers ]] || \
+    ! grep -qw cpu /sys/fs/cgroup/cgroup.controllers; then
+    echo "The Linux host does not expose the cgroup v2 CPU controller." >&2
+    exit 1
+  fi
+}
+
 install_lab() {
   require_repo
+  verify_kernel_host
   export DEBIAN_FRONTEND=noninteractive
   apt-get update
   apt-get install --no-install-recommends -y ca-certificates curl jq python3-venv
+  install_docker_engine
 
   if [[ -e /opt/ecoroute-kernel-lab && ! -L /opt/ecoroute-kernel-lab ]]; then
     echo "/opt/ecoroute-kernel-lab exists and is not a symlink" >&2
@@ -145,8 +200,8 @@ start_lab() {
     baseUrl: "http://host.docker.internal:9100/v1",
     credentialRef: null,
     physicalModel: "ecoroute-kernel-lab",
-    region: "lima-local",
-    gridZone: "lima-local",
+    region: "kernel-lab-local",
+    gridZone: "kernel-lab-local",
     qualityTier: "small",
     capabilities: ["text"],
     contextWindowTokens: 4096,

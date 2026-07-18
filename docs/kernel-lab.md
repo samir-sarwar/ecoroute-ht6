@@ -1,7 +1,8 @@
 # Real Linux kernel-control demo
 
-The kernel lab runs EcoRoute in a four-vCPU, 8 GiB ARM64 Ubuntu VM and replaces the node
-simulator with the real Linux agent. It creates two native workloads in the guest:
+The kernel lab runs EcoRoute in an Ubuntu VM and replaces the node simulator with the real Linux
+agent. On Apple silicon it uses Lima ARM64; on Windows 11 it uses WSL2. It creates two native
+workloads in the guest:
 
 - an OpenAI-compatible CPU-bound inference target;
 - four continuously busy background worker processes.
@@ -12,7 +13,7 @@ sets the background weight to 25, and caps the entire background group at 20% of
 agent verifies both the values and PID placement, records the kernel's `cpu.stat` counters, and
 rolls every process back to its original systemd cgroup after the benchmark.
 
-## Requirements
+## macOS requirements
 
 - Apple-silicon Mac with macOS 13 or newer.
 - Homebrew.
@@ -25,6 +26,14 @@ rolls every process back to its original systemd cgroup after the benchmark.
 ```bash
 ./scripts/kernel-lab-up
 ./scripts/kernel-lab-demo
+```
+
+On Windows 11, follow the [WSL2 runbook](kernel-lab-windows.md), then run these commands inside
+Ubuntu:
+
+```bash
+./scripts/kernel-lab-wsl up
+./scripts/kernel-lab-wsl demo
 ```
 
 Open the control center at <http://localhost:3000> and select **Self-Hosted Nodes**. The node must
@@ -50,10 +59,10 @@ over.
 Latency, throughput, process CPU time, cgroup settings, PID placement, and throttling are measured
 from the guest. They are genuine Linux kernel behavior.
 
-An Apple-silicon VM does not expose Intel RAPL or an NVIDIA total-energy counter. The benchmark
-therefore reports energy as `unavailable`; it never substitutes a simulated energy value. A
-supported bare-metal Intel or NVIDIA Linux host can run the same real agent to populate the energy
-metrics.
+The Lima and WSL2 VMs do not normally expose Intel RAPL or an NVIDIA total-energy counter. The
+benchmark therefore reports energy as `unavailable`; it never substitutes a simulated energy
+value. A supported bare-metal Intel or NVIDIA Linux host can run the same real agent to populate
+the energy metrics.
 
 The included target performs deterministic CPU work behind an OpenAI-compatible API so the lab is
 credential-free and repeatable. To benchmark a trained model, replace the endpoint base URL with

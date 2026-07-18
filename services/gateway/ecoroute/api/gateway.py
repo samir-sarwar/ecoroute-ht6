@@ -143,6 +143,7 @@ def _candidate(
         carbon_source=reading.source,
         processing_location_evidence=endpoint.processing_location_evidence,
         grid_attribution=endpoint.grid_attribution,
+        azure_deployment_type=endpoint.azure_deployment_type,
         slm_profile_status=profile.status if profile else None,
         allowed_task_types=frozenset(profile.definition.get("allowed_tasks", []))
         if profile
@@ -176,6 +177,8 @@ def _impact_evidence(
         "carbon_metadata": selected_reading.metadata,
         "grid_zone": selected_reading.zone,
         "endpoint_region": selected_endpoint.region,
+        "provider": selected_endpoint.provider,
+        "azure_deployment_type": selected_endpoint.azure_deployment_type,
         "processing_location_evidence": selected_endpoint.processing_location_evidence,
         "grid_attribution": selected_endpoint.grid_attribution,
         "baseline_carbon_source": baseline_reading.source,
@@ -183,6 +186,8 @@ def _impact_evidence(
         "baseline_carbon_metadata": baseline_reading.metadata,
         "baseline_grid_zone": baseline_reading.zone,
         "baseline_endpoint_region": baseline_endpoint.region,
+        "baseline_provider": baseline_endpoint.provider,
+        "baseline_azure_deployment_type": baseline_endpoint.azure_deployment_type,
         "baseline_processing_location_evidence": baseline_endpoint.processing_location_evidence,
         "baseline_grid_attribution": baseline_endpoint.grid_attribution,
         "carbon_accounting_available": baseline.carbon_available and selected.carbon_available,
@@ -261,6 +266,8 @@ def _headers(
     *,
     carbon_accounting_available: bool = True,
     grid_attribution: str = "unknown",
+    processing_region: str = "unknown",
+    provider_deployment_type: str | None = None,
 ) -> dict[str, str]:
     return {
         "X-Request-Id": str(request_id),
@@ -274,6 +281,8 @@ def _headers(
             "available" if carbon_accounting_available else "unavailable"
         ),
         "X-EcoRoute-Grid-Attribution": grid_attribution,
+        "X-EcoRoute-Processing-Region": processing_region,
+        "X-EcoRoute-Provider-Deployment": provider_deployment_type or "not-applicable",
     }
 
 
@@ -525,6 +534,8 @@ async def chat_completions(
                     baseline_endpoint, baseline_reading
                 ),
                 grid_attribution=baseline_endpoint.grid_attribution,
+                processing_region=baseline_endpoint.region,
+                provider_deployment_type=baseline_endpoint.azure_deployment_type,
             )
             if body.stream:
                 return await _stream_response(
@@ -585,6 +596,8 @@ async def chat_completions(
                     baseline_endpoint, baseline_reading
                 ),
                 grid_attribution=baseline_endpoint.grid_attribution,
+                processing_region=baseline_endpoint.region,
+                provider_deployment_type=baseline_endpoint.azure_deployment_type,
             )
             if body.stream:
                 return await _stream_response(
@@ -1052,6 +1065,8 @@ async def chat_completions(
                     baseline.carbon_available and stream_selected.carbon_available
                 ),
                 grid_attribution=stream_selected_row.grid_attribution,
+                processing_region=stream_selected_row.region,
+                provider_deployment_type=stream_selected_row.azure_deployment_type,
             ),
         )
 
@@ -1467,6 +1482,8 @@ async def chat_completions(
         fallback_used,
         carbon_accounting_available=impact.carbon_accounting_available,
         grid_attribution=selected_row.grid_attribution,
+        processing_region=selected_row.region,
+        provider_deployment_type=selected_row.azure_deployment_type,
     )
     if body.metadata and body.metadata.get("ecoroute_debug") == "true" and settings.demo_mode:
         completion["ecoroute"] = {

@@ -62,6 +62,7 @@ class EndpointCandidate:
     carbon_source: str = "unknown"
     processing_location_evidence: str = "unknown"
     grid_attribution: str = "unknown"
+    azure_deployment_type: str | None = None
 
 
 def evidence_penalty(candidate: EndpointCandidate) -> float:
@@ -179,6 +180,7 @@ def select_candidate(
             latency_p95_ms=candidate.latency_p95_ms,
             evidence=candidate.energy_evidence,
             region=candidate.region,
+            azure_deployment_type=candidate.azure_deployment_type,
             grid_zone=candidate.grid_zone,
             carbon_evidence=candidate.carbon_evidence,
             processing_location_evidence=candidate.processing_location_evidence,

@@ -1194,13 +1194,15 @@ export interface components {
              * Provider
              * @enum {string}
              */
-            provider: "freesolo" | "gemini" | "openai" | "ollama" | "vllm" | "openai_compatible" | "fake";
+            provider: "azure_openai" | "freesolo" | "gemini" | "openai" | "ollama" | "vllm" | "openai_compatible" | "fake";
             /** Baseurl */
             baseUrl: string;
             /** Credentialref */
             credentialRef?: string | null;
             /** Physicalmodel */
             physicalModel: string;
+            /** Azuredeploymenttype */
+            azureDeploymentType?: ("standard" | "provisioned_managed") | null;
             /** Region */
             region: string;
             /** Gridzone */

@@ -82,7 +82,8 @@ class Settings(BaseSettings):
     allowed_endpoint_hosts: str = Field("", validation_alias="ECOROUTE_ALLOWED_ENDPOINT_HOSTS")
     allowed_credential_envs: str = Field(
         "FREESOLO_API_KEY,GEMINI_API_KEY,OPENAI_API_KEY,OPENAI_US_API_KEY,"
-        "OPENAI_EU_API_KEY,OLLAMA_API_KEY,VLLM_API_KEY",
+        "OPENAI_EU_API_KEY,AZURE_OPENAI_CANADA_KEY,AZURE_OPENAI_SWEDEN_KEY,"
+        "AZURE_OPENAI_DEMO_KEY,OLLAMA_API_KEY,VLLM_API_KEY",
         validation_alias="ECOROUTE_ALLOWED_CREDENTIAL_ENVS",
     )
     agent_approved_controls: str = Field(

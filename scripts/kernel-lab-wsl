@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+action="${1:-up}"
+script_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+repo_root="${2:-$(dirname "$script_dir")}"
+
+if [[ "$(uname -s)" != "Linux" ]] || ! grep -qi microsoft /proc/sys/kernel/osrelease; then
+  echo "Run this command inside an Ubuntu WSL2 terminal." >&2
+  exit 1
+fi
+
+if [[ "$(ps -p 1 -o comm= | tr -d '[:space:]')" != "systemd" ]]; then
+  cat >&2 <<'EOF'
+This WSL distribution is not running systemd.
+
+For a current Ubuntu installed with `wsl --install`, update WSL and restart it:
+  wsl --update
+  wsl --shutdown
+
+If systemd is still disabled, add the following to /etc/wsl.conf inside Ubuntu:
+  [boot]
+  systemd=true
+
+Then run `wsl --shutdown` from PowerShell and reopen Ubuntu.
+EOF
+  exit 1
+fi
+
+if [[ "$action" == "up" ]]; then
+  available_kib="$(df -Pk "$repo_root" | awk 'NR == 2 {print $4}')"
+  minimum_kib=$((12 * 1024 * 1024))
+  if ((available_kib < minimum_kib)); then
+    echo "At least 12 GB free disk is required for Docker images and build caches." >&2
+    echo "Currently available: $((available_kib / 1024 / 1024)) GB." >&2
+    exit 1
+  fi
+  if [[ "$repo_root" == /mnt/* ]]; then
+    echo "Note: the repository is on a Windows-mounted drive. It will work, but builds are faster under ~/src in WSL."
+  fi
+fi
+
+sudo "$repo_root/scripts/kernel-lab-guest" "$action" "$repo_root"
+
+if [[ "$action" == "up" ]]; then
+  echo "Control Center from Windows: http://localhost:3000"
+  echo "Support Demo from Windows:   http://localhost:3001"
+  echo "Run the benchmark with: ./scripts/kernel-lab-wsl demo"
+fi

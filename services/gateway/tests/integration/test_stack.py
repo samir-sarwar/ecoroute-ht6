@@ -19,6 +19,7 @@ from ecoroute.db.models import (
     Job,
     LogicalModel,
     ModelAttempt,
+    ModelEndpoint,
     RouteDecision,
     Workspace,
 )
@@ -58,6 +59,20 @@ async def test_ephemeral_stack_contracts() -> None:
     async with SessionLocal() as session:
         assert int(await session.scalar(select(func.count(Workspace.id))) or 0) == 1
         assert int(await session.scalar(select(func.count(LogicalModel.id))) or 0) == 1
+        azure_endpoints = list(
+            (
+                await session.scalars(
+                    select(ModelEndpoint).where(ModelEndpoint.provider == "azure_openai")
+                )
+            ).all()
+        )
+        assert len(azure_endpoints) == 2
+        assert {item.region for item in azure_endpoints} == {
+            "canada-central",
+            "sweden-central",
+        }
+        assert {item.azure_deployment_type for item in azure_endpoints} == {"standard"}
+        assert all(item.processing_location_evidence == "simulated" for item in azure_endpoints)
 
     transport = httpx.ASGITransport(app=app)
     headers = {"Authorization": "Bearer ecoroute-integration-key"}
@@ -297,6 +312,11 @@ async def test_ephemeral_stack_contracts() -> None:
         )
         assert tool_response.parse().choices[0].message.tool_calls
         assert tool_response.headers["x-ecoroute-route"] == "frontier"
+        assert tool_response.headers["x-ecoroute-provider-deployment"] == "standard"
+        assert tool_response.headers["x-ecoroute-processing-region"] in {
+            "canada-central",
+            "sweden-central",
+        }
 
         with pytest.raises(NotFoundError) as missing:
             await sdk.chat.completions.create(

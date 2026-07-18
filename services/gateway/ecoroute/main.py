@@ -52,6 +52,8 @@ app.add_middleware(
         "X-EcoRoute-Fallback",
         "X-EcoRoute-Carbon-Accounting",
         "X-EcoRoute-Grid-Attribution",
+        "X-EcoRoute-Processing-Region",
+        "X-EcoRoute-Provider-Deployment",
     ],
 )
 app.add_exception_handler(EcoRouteError, ecoroute_error_handler)  # type: ignore[arg-type]

@@ -13,9 +13,15 @@ The defensible claim is:
 > EcoRoute routed the request among the configured eligible endpoints using current regional grid
 > carbon intensity and the recorded policy weights.
 
-It is not defensible to claim that EcoRoute discovered or selected OpenAI's cleanest physical data
-center. A normal OpenAI inference response does not disclose that data center or its electricity
-metering.
+For Azure OpenAI `Standard` and regional `Provisioned Managed` deployments, the provider contract
+states that inference data is processed in the deployment region. EcoRoute can therefore choose
+among operator-configured Azure regional deployments using their current grid signals. It is still
+not defensible to claim provider facility-level electricity metering: the carbon result is an
+operational estimate from endpoint coefficients and mapped regional grid intensity.
+
+The business application continues to use one OpenAI-compatible EcoRoute base URL. EcoRoute
+replaces the logical model alias with the selected Azure deployment name and sends the request to
+that deployment's resource URL and credential; no per-request client change is needed.
 
 ## Configure live grid data
 
@@ -34,6 +40,42 @@ ECOROUTE_CARBON_FRESHNESS_TARGET_MINUTES=15
 provider as unconfigured. To use an independently deployed Carbon Aware service instead, set
 `ECOROUTE_CARBON_PROVIDER=carbon_aware` and `CARBON_AWARE_BASE_URL`; Carbon Aware supports direct
 zone lookup but not EcoRoute's Electricity Maps data-center lookup mode.
+
+## Register Azure OpenAI regional endpoints
+
+Create the same model deployment in at least two Azure OpenAI resources/regions. The deployment
+must use `Standard` or the regional form of `Provisioned Managed`; Global and Data Zone deployment
+types are deliberately rejected because they do not prove one exact processing region. Azure
+documents the [regional data-processing behavior](https://learn.microsoft.com/en-us/azure/foundry/foundry-models/concepts/models-sold-directly-by-azure-region-availability)
+and its [OpenAI v1 endpoint format](https://learn.microsoft.com/en-us/azure/foundry/foundry-models/concepts/endpoints).
+
+Put each resource key only in the gateway environment and include its variable in
+`ECOROUTE_ALLOWED_CREDENTIAL_ENVS`. Register one physical endpoint per regional deployment:
+
+```json
+{
+  "provider": "azure_openai",
+  "baseUrl": "https://my-canada-resource.openai.azure.com/openai/v1",
+  "credentialRef": "env:AZURE_OPENAI_CANADA_KEY",
+  "physicalModel": "my-gpt-deployment",
+  "azureDeploymentType": "standard",
+  "region": "canada-central",
+  "gridZone": "CA-ON",
+  "processingLocationEvidence": "provider_contract",
+  "gridLookupMode": "zone",
+  "gridAttribution": "regional_proxy",
+  "energyEvidence": "estimated"
+}
+```
+
+`physicalModel` is the Azure deployment name, not merely the base model name. The endpoint test
+authenticates to `GET /openai/v1/models` using Azure's `api-key` header and reports whether the
+configured deployment appears in that model list. A successful live completion is the final
+data-plane validation that the deployment exists.
+
+The API also accepts the Azure `services.ai.azure.com` resource hostname. It rejects non-HTTPS
+URLs, paths other than `/openai/v1`, missing credential references, and Azure deployment metadata
+attached to another provider.
 
 ## Register regional OpenAI endpoints
 
@@ -81,6 +123,15 @@ accounting remains unavailable rather than falling back to the caller's IP or a 
 The endpoint test checks both provider health and the grid mapping. Every completed request stores
 the selected and baseline grid source, observed timestamp, estimation metadata, processing-
 location evidence, grid attribution, coefficient version, and claim scope. Responses include
-`X-EcoRoute-Carbon-Accounting` and `X-EcoRoute-Grid-Attribution` headers. Requests with missing
+`X-EcoRoute-Carbon-Accounting`, `X-EcoRoute-Grid-Attribution`,
+`X-EcoRoute-Processing-Region`, and `X-EcoRoute-Provider-Deployment` headers. Requests with missing
 location or grid evidence retain energy/cost accounting but are excluded from carbon totals,
 avoided-carbon metrics, charts, and Impact Framework observations.
+
+## Demo behavior
+
+The two frontier demo endpoints are shaped like Azure OpenAI resources in Canada Central and
+Sweden Central, so routing, registry, response provenance, and grid-selection behavior exercise the
+same path. In `ECOROUTE_DEMO_MODE=true`, provider calls and grid readings remain deterministic
+fixtures, the evidence remains `simulated`, and no Azure key or network call is used. Set demo mode
+off and register real endpoints to enable the live Azure adapter.
