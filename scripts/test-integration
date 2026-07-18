@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+compose=(docker compose -p ecoroute-integration -f infra/compose.test.yaml)
+cleanup() {
+  "${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+cleanup
+"${compose[@]}" up -d --wait
+
+export ECOROUTE_ENV=test
+export ECOROUTE_DEMO_MODE=true
+export ECOROUTE_DATABASE_URL=postgresql+asyncpg://ecoroute:ecoroute@127.0.0.1:55432/ecoroute_test
+export ECOROUTE_REDIS_URL=redis://127.0.0.1:56379/0
+export CARBON_AWARE_BASE_URL=http://127.0.0.1:58080
+export ECOROUTE_USE_SENTENCE_TRANSFORMERS=false
+export ECOROUTE_GATEWAY_KEY=ecoroute-integration-key
+export ECOROUTE_AGENT_TOKEN=ecoroute-integration-agent
+
+"${PYTHON:-python3}" -m pytest -q services/gateway/tests/integration
+

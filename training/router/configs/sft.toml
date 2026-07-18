@@ -1,0 +1,16 @@
+model = "Qwen/Qwen3.5-2B"
+algorithm = "sft"
+thinking = false
+
+[environment]
+id = "ht6/router"
+
+[environment.params]
+split = "train"
+
+[train]
+epochs = 3
+max_examples = 8000
+lora_rank = 32
+lora_alpha = 64
+max_context_tokens = 4096

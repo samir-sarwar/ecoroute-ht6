@@ -1,0 +1,157 @@
+name: ecoroute
+
+x-python-service: &python-service
+  image: ecoroute-python:latest
+  env_file:
+    - path: ../.env
+      required: false
+  environment:
+    ECOROUTE_DATABASE_URL: postgresql+asyncpg://ecoroute:ecoroute@postgres:5432/ecoroute
+    ECOROUTE_REDIS_URL: redis://redis:6379/0
+    ECOROUTE_PUBLIC_URL: http://gateway:8000
+  restart: unless-stopped
+  init: true
+
+services:
+  postgres:
+    image: pgvector/pgvector:0.8.5-pg17
+    environment:
+      POSTGRES_USER: ecoroute
+      POSTGRES_PASSWORD: ecoroute
+      POSTGRES_DB: ecoroute
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ecoroute -d ecoroute"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:8.0.2-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  carbon-aware:
+    image: python:3.12.11-slim
+    working_dir: /app
+    command: ["python", "/app/server.py"]
+    volumes:
+      - ./carbon-aware/server.py:/app/server.py:ro
+    expose: ["8080"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/healthz')"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  migrate:
+    <<: *python-service
+    command: ["alembic", "-c", "services/gateway/alembic.ini", "upgrade", "head"]
+    restart: "no"
+    depends_on:
+      postgres: { condition: service_healthy }
+
+  seed:
+    <<: *python-service
+    command: ["python", "-m", "ecoroute.seed"]
+    restart: "no"
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+
+  gateway:
+    <<: *python-service
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.python
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      seed: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+      carbon-aware: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/readyz')"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  worker:
+    <<: *python-service
+    command: ["python", "-m", "ecoroute_worker.main"]
+    depends_on:
+      seed: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+
+  agent-simulator:
+    <<: *python-service
+    command: ["python", "-m", "ecoroute_agent.main"]
+    volumes:
+      - agent-state:/var/lib/ecoroute-agent
+    depends_on:
+      gateway: { condition: service_healthy }
+
+  control-center:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.web
+      args: { APP: control-center }
+    env_file:
+      - path: ../.env
+        required: false
+    environment:
+      APP: control-center
+      PORT: 3000
+      ECOROUTE_GATEWAY_INTERNAL_URL: http://gateway:8000
+      ECOROUTE_GATEWAY_KEY: ${ECOROUTE_GATEWAY_KEY:-ecoroute-demo-key}
+    ports:
+      - "127.0.0.1:3000:3000"
+    restart: unless-stopped
+    init: true
+    depends_on:
+      gateway: { condition: service_healthy }
+
+  support-demo:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.web
+      args: { APP: support-demo }
+    env_file:
+      - path: ../.env
+        required: false
+    environment:
+      APP: support-demo
+      PORT: 3001
+      ECOROUTE_GATEWAY_INTERNAL_URL: http://gateway:8000
+      ECOROUTE_SUPPORT_DEMO_GATEWAY_KEY: ${ECOROUTE_SUPPORT_DEMO_GATEWAY_KEY:-ecoroute-demo-key}
+    ports:
+      - "127.0.0.1:3001:3001"
+    restart: unless-stopped
+    init: true
+    depends_on:
+      gateway: { condition: service_healthy }
+
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    profiles: ["observability"]
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "127.0.0.1:9090:9090"
+    depends_on:
+      gateway: { condition: service_healthy }
+
+volumes:
+  postgres-data:
+  redis-data:
+  agent-state:

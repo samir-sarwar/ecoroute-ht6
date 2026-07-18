@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+set -euo pipefail
+docker compose exec gateway python -m ecoroute.seed
+

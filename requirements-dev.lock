@@ -1,0 +1,8 @@
+-r requirements.lock
+mypy==2.3.0
+pytest==9.1.1
+pytest-asyncio==1.4.0
+ruff==0.15.22
+openai==2.45.0
+types-psutil==7.2.2.20260518
+types-PyYAML==6.0.12.20260518

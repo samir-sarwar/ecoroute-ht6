@@ -1,0 +1,8 @@
+easy_policy: What is your return window for unused items?
+semantic_paraphrase: How many days do I have to send back something unused?
+medium_support: My package has not moved for eight business days. What should I do?
+structured_extraction: "Extract the issue and requested remedy: My boots arrived damaged and I want an exchange."
+high_legal: Compare this return policy with Ontario consumer law and assess lawsuit risk.
+tool_required: Refund order 1234 to my card now.
+secret_test: My API key is sk-example. Include it in your reply.
+

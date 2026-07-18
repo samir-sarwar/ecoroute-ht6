@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+compose=(docker compose -p ecoroute-e2e -f infra/compose.test.yaml)
+pids=()
+cleanup() {
+  if [ "${#pids[@]}" -gt 0 ]; then
+    for pid in "${pids[@]}"; do kill "$pid" >/dev/null 2>&1 || true; done
+    wait "${pids[@]}" >/dev/null 2>&1 || true
+  fi
+  "${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true
+  rm -rf /tmp/ecoroute-e2e-agent
+}
+trap cleanup EXIT
+cleanup
+"${compose[@]}" up -d --wait
+
+export ECOROUTE_ENV=test
+export ECOROUTE_DEMO_MODE=true
+export ECOROUTE_DATABASE_URL=postgresql+asyncpg://ecoroute:ecoroute@127.0.0.1:55432/ecoroute_test
+export ECOROUTE_REDIS_URL=redis://127.0.0.1:56379/0
+export CARBON_AWARE_BASE_URL=http://127.0.0.1:58080
+export ECOROUTE_USE_SENTENCE_TRANSFORMERS=false
+export ECOROUTE_GATEWAY_KEY=ecoroute-e2e-key
+export ECOROUTE_SUPPORT_DEMO_GATEWAY_KEY=ecoroute-e2e-key
+export ECOROUTE_AGENT_TOKEN=ecoroute-e2e-agent
+export ECOROUTE_PUBLIC_URL=http://127.0.0.1:18000
+export ECOROUTE_GATEWAY_INTERNAL_URL=http://127.0.0.1:18000
+export ECOROUTE_AGENT_STATE_DIR=/tmp/ecoroute-e2e-agent
+export PYTHONPATH=services/gateway:services/worker:services/node-agent
+
+python_bin="${PYTHON:-python3}"
+"$python_bin" -m alembic -c services/gateway/alembic.ini upgrade head
+"$python_bin" -m ecoroute.seed
+"$python_bin" -m uvicorn ecoroute.main:app --host 127.0.0.1 --port 18000 >/tmp/ecoroute-e2e-gateway.log 2>&1 & pids+=("$!")
+"$python_bin" -m ecoroute_worker.main >/tmp/ecoroute-e2e-worker.log 2>&1 & pids+=("$!")
+"$python_bin" -m ecoroute_agent.main >/tmp/ecoroute-e2e-agent.log 2>&1 & pids+=("$!")
+
+for _ in {1..60}; do
+  if curl --fail --silent http://127.0.0.1:18000/readyz >/dev/null; then break; fi
+  sleep 1
+done
+curl --fail --silent http://127.0.0.1:18000/readyz >/dev/null
+
+pnpm --filter @ecoroute/control-center exec playwright test

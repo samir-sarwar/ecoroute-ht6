@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+BASE_URL="${ECOROUTE_PUBLIC_URL:-http://localhost:8000}"
+KEY="${ECOROUTE_GATEWAY_KEY:-ecoroute-demo-key}"
+AUTH="Authorization: Bearer ${KEY}"
+tmp_dir="$(mktemp -d)"
+colors=(amber blue coral dune ember fern gold hazel indigo jade)
+places=(arch bay cove dell field grove hill inlet lake meadow)
+tones=(brisk calm clear gentle mellow quiet steady soft warm bright)
+session="${colors[$(( $(date +%s) % 10 ))]} ${places[$(( $$ % 10 ))]} ${tones[$(( ($(date +%s) + $$) % 10 ))]}"
+
+cleanup() {
+  curl --max-time 3 --fail --silent -H "$AUTH" -H 'Content-Type: application/json' \
+    "${BASE_URL}/api/v1/demo/quality-failure" -d '{"enabled":false}' >/dev/null 2>&1 || true
+  curl --max-time 3 --fail --silent -H "$AUTH" -H 'Content-Type: application/json' \
+    "${BASE_URL}/api/v1/demo/grid-scenario" -d '{"scenario":"clean"}' >/dev/null 2>&1 || true
+  rm -rf "$tmp_dir"
+}
+trap cleanup EXIT
+
+curl --fail --silent "${BASE_URL}/readyz" | grep -q '"status":"ready"'
+curl --fail --silent -H "$AUTH" "${BASE_URL}/v1/models" | grep -q 'support-default'
+curl --fail --silent -H "$AUTH" -H 'Content-Type: application/json' \
+  "${BASE_URL}/api/v1/demo/quality-failure" -d '{"enabled":false}' >/dev/null
+curl --fail --silent -H "$AUTH" -H 'Content-Type: application/json' \
+  "${BASE_URL}/api/v1/demo/grid-scenario" -d '{"scenario":"clean"}' >/dev/null
+
+chat() {
+  local name="$1"
+  local system_prompt="$2"
+  local prompt="$3"
+  local payload
+  payload="$(printf '{"model":"support-default","messages":[{"role":"system","content":"%s"},{"role":"user","content":"%s"}],"temperature":0}' "$system_prompt" "$prompt")"
+  curl --fail --silent --show-error -D "$tmp_dir/$name.headers" -o "$tmp_dir/$name.json" \
+    -H "$AUTH" -H 'Content-Type: application/json' \
+    "${BASE_URL}/v1/chat/completions" \
+    --data "$payload"
+  grep -q '"choices"' "$tmp_dir/$name.json"
+}
+
+header_is() {
+  local name="$1"
+  local header="$2"
+  local expected="$3"
+  local actual
+  actual="$(awk -F ': *' -v key="$header" 'tolower($1) == tolower(key) {print $2}' "$tmp_dir/$name.headers" | tail -1 | tr -d '\r')"
+  if [ "$actual" != "$expected" ]; then
+    printf 'Expected %s=%s for %s, got %s\n' "$header" "$expected" "$name" "$actual" >&2
+    return 1
+  fi
+}
+
+system_prompt="Northstar support smoke context ${session}"
+chat first "$system_prompt" 'What is your return window for unused items?'
+header_is first X-EcoRoute-Cache miss
+chat exact "$system_prompt" 'What is your return window for unused items?'
+header_is exact X-EcoRoute-Cache exact
+chat semantic "$system_prompt" 'How many days do I have to send back something unused?'
+header_is semantic X-EcoRoute-Cache semantic
+
+curl --fail --silent -H "$AUTH" -H 'Content-Type: application/json' \
+  "${BASE_URL}/api/v1/demo/grid-scenario" -d '{"scenario":"dirty"}' >/dev/null
+chat dirty "Northstar dirty-grid smoke ${session}" 'Can I return a final-sale item?'
+header_is dirty X-EcoRoute-Route demo-support-slm
+
+chat legal "Northstar legal smoke ${session}" 'Compare this return policy with Ontario consumer law and assess lawsuit risk.'
+header_is legal X-EcoRoute-Route frontier
+
+curl --fail --silent -H "$AUTH" -H 'Content-Type: application/json' \
+  "${BASE_URL}/api/v1/demo/quality-failure" -d '{"enabled":true}' >/dev/null
+chat fallback "Northstar fallback smoke ${session}" 'What is the standard shipping time?'
+header_is fallback X-EcoRoute-Fallback true
+header_is fallback X-EcoRoute-Route frontier
+
+curl --fail --silent -H "$AUTH" \
+  "${BASE_URL}/api/v1/reports/requests.csv?route=cache" \
+  -o "$tmp_dir/requests.csv"
+grep -q '^request_id,started_at_utc,logical_model,status,route,' "$tmp_dir/requests.csv"
+grep -q ',cache,' "$tmp_dir/requests.csv"
+curl --fail --silent -H "$AUTH" -H 'Content-Type: application/json' \
+  "${BASE_URL}/api/v1/reports/impact-framework" -d '{}' \
+  -o "$tmp_dir/impact.yml"
+grep -q '^name: EcoRoute operational impact export' "$tmp_dir/impact.yml"
+grep -q 'methodology-version: ecoroute-v1' "$tmp_dir/impact.yml"
+
+for _ in {1..30}; do
+  if curl --fail --silent -H "$AUTH" "${BASE_URL}/api/v1/agents" \
+    -o "$tmp_dir/agents.json" && grep -q '"simulator":true' "$tmp_dir/agents.json"; then
+    break
+  fi
+  sleep 1
+done
+grep -q '"simulator":true' "$tmp_dir/agents.json"
+
+curl --fail --silent "${ECOROUTE_WEB_URL:-http://localhost:3000}" | grep -q 'EcoRoute'
+curl --fail --silent "${ECOROUTE_SUPPORT_DEMO_URL:-http://localhost:3001}" | grep -q 'Northstar Outfitters'
+
+echo 'EcoRoute demo smoke passed.'
