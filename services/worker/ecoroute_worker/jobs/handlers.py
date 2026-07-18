@@ -17,7 +17,8 @@ from typing import Any
 
 import httpx
 from ecoroute.api.events import publish_event
-from ecoroute.carbon.providers import CarbonAwareSdkProvider, FixtureCarbonProvider
+from ecoroute.carbon.providers import FixtureCarbonProvider, configured_carbon_provider
+from ecoroute.carbon.service import carbon_cache_key, carbon_lookup_key
 from ecoroute.config import get_settings
 from ecoroute.db.base import utcnow
 from ecoroute.db.models import (
@@ -757,34 +758,68 @@ async def handle_carbon_refresh(job: Job) -> dict[str, Any]:
     zones = [str(value) for value in job.input.get("zones", [])]
     scenario_raw = await redis_client.get("ecoroute:demo:grid")
     scenario = scenario_raw.decode() if isinstance(scenario_raw, bytes) else scenario_raw
-    provider: CarbonAwareSdkProvider | FixtureCarbonProvider
     provider = (
         FixtureCarbonProvider(scenario or "moderate")
         if settings.demo_mode
-        else CarbonAwareSdkProvider(settings.carbon_aware_base_url)
+        else configured_carbon_provider(settings)
     )
     stored = []
+    failures: list[dict[str, str]] = []
     async with SessionLocal() as session:
-        if not zones:
-            zones = list(
+        locations: list[tuple[str, str | None, str | None]]
+        if zones:
+            locations = [(zone, None, None) for zone in zones]
+        else:
+            endpoints = list(
+                (
+                    await session.scalars(
+                        select(ModelEndpoint).where(
+                            ModelEndpoint.enabled.is_(True),
+                            ModelEndpoint.deleted_at.is_(None),
+                        )
+                    )
+                ).all()
+            )
+            locations = list(
                 dict.fromkeys(
                     (
-                        await session.scalars(
-                            select(ModelEndpoint.grid_zone).where(
-                                ModelEndpoint.enabled.is_(True),
-                                ModelEndpoint.deleted_at.is_(None),
-                            )
-                        )
-                    ).all()
+                        endpoint.grid_zone,
+                        endpoint.grid_data_center_provider
+                        if endpoint.grid_lookup_mode == "data_center"
+                        else None,
+                        endpoint.grid_data_center_region
+                        if endpoint.grid_lookup_mode == "data_center"
+                        else None,
+                    )
+                    for endpoint in endpoints
                 )
             )
-        for zone in zones:
-            reading = await provider.reading(zone)
+        for zone, data_center_provider, data_center_region in locations:
+            lookup_key = carbon_lookup_key(data_center_provider, data_center_region)
+            try:
+                reading = await provider.reading(
+                    zone,
+                    data_center_provider=data_center_provider,
+                    data_center_region=data_center_region,
+                )
+            except (TimeoutError, TypeError, OSError, ValueError, httpx.HTTPError) as exc:
+                failures.append(
+                    {
+                        "zone": zone,
+                        "error": type(exc).__name__,
+                    }
+                )
+                continue
+            if utcnow() - reading.observed_at > timedelta(
+                minutes=settings.carbon_freshness_target_minutes
+            ):
+                reading = reading.model_copy(update={"evidence": "stale"})
             existing = await session.scalar(
                 select(CarbonReadingRecord).where(
                     CarbonReadingRecord.zone == reading.zone,
                     CarbonReadingRecord.observed_at == reading.observed_at,
                     CarbonReadingRecord.source == reading.source,
+                    CarbonReadingRecord.lookup_key == lookup_key,
                 )
             )
             if existing is None:
@@ -796,17 +831,22 @@ async def handle_carbon_refresh(job: Job) -> dict[str, Any]:
                         fetched_at=reading.fetched_at,
                         source=reading.source,
                         evidence=reading.evidence,
+                        lookup_key=lookup_key,
+                        reading_metadata=reading.metadata,
                     )
                 )
             await redis_client.set(
-                f"ecoroute:carbon:{zone}",
+                carbon_cache_key(zone, data_center_provider, data_center_region),
                 reading.model_dump_json(),
                 ex=settings.carbon_cache_seconds,
             )
             stored.append(reading.model_dump(mode="json"))
         await session.commit()
-    await _publish_job_event(job, "carbon.updated", {"zones": zones})
-    return {"readings": stored}
+    if locations and not stored:
+        raise RuntimeError("All configured carbon locations failed to refresh")
+    refreshed_zones = [location[0] for location in locations]
+    await _publish_job_event(job, "carbon.updated", {"zones": refreshed_zones})
+    return {"readings": stored, "failures": failures}
 
 
 async def handle_cache_cleanup(job: Job) -> dict[str, Any]:
@@ -906,7 +946,7 @@ async def handle_report_generate(job: Job) -> dict[str, Any]:
         "generated_at": utcnow().isoformat(),
         "request_count": count,
         "filters": job.input.get("filters", {}),
-        "methodology_version": "ecoroute-v1",
+        "methodology_version": "ecoroute-v2",
     }
 
 

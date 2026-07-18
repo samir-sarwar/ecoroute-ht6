@@ -1006,6 +1006,11 @@ function EndpointsView() {
       physicalModel: data.get("physicalModel"),
       region: data.get("region"),
       gridZone: data.get("gridZone"),
+      gridLookupMode: data.get("gridLookupMode"),
+      gridDataCenterProvider: data.get("gridDataCenterProvider") || null,
+      gridDataCenterRegion: data.get("gridDataCenterRegion") || null,
+      processingLocationEvidence: data.get("processingLocationEvidence"),
+      gridAttribution: data.get("gridAttribution"),
       qualityTier: data.get("qualityTier"),
       capabilities,
       contextWindowTokens: Number(data.get("contextWindowTokens")),
@@ -1051,6 +1056,11 @@ function EndpointsView() {
         physicalModel: data.get("physicalModel"),
         region: data.get("region"),
         gridZone: data.get("gridZone"),
+        gridLookupMode: data.get("gridLookupMode"),
+        gridDataCenterProvider: data.get("gridDataCenterProvider") || null,
+        gridDataCenterRegion: data.get("gridDataCenterRegion") || null,
+        processingLocationEvidence: data.get("processingLocationEvidence"),
+        gridAttribution: data.get("gridAttribution"),
         qualityTier: data.get("qualityTier"),
         capabilities: data.getAll("capabilities"),
         contextWindowTokens: Number(data.get("contextWindowTokens")),
@@ -1093,7 +1103,7 @@ function EndpointsView() {
       <Header
         eyebrow="REGISTRY / EXPLICIT POOLS"
         title="Model Endpoints"
-        description="Provider identity, capabilities, pricing, energy evidence, and logical mappings."
+        description="Provider identity, processing-location evidence, grid attribution, energy coefficients, and logical mappings."
         icon={<Boxes />}
       />
       <ErrorBanner
@@ -1183,6 +1193,45 @@ function EndpointsView() {
             <Field label="Grid zone">
               <input required name="gridZone" />
             </Field>
+            <Field label="Grid lookup">
+              <select name="gridLookupMode" defaultValue="zone">
+                <option value="zone">Exact zone key</option>
+                <option value="data_center">Electricity Maps data center</option>
+              </select>
+            </Field>
+            <Field label="Data-center provider" hint="Required for data-center lookup, e.g. gcp.">
+              <input name="gridDataCenterProvider" />
+            </Field>
+            <Field label="Data-center region" hint="Provider region identifier, e.g. europe-west1.">
+              <input name="gridDataCenterRegion" />
+            </Field>
+            <Field label="Processing-location evidence">
+              <select name="processingLocationEvidence" defaultValue="unknown">
+                {[
+                  "provider_contract",
+                  "operator_declared",
+                  "self_hosted",
+                  "unknown",
+                  "simulated",
+                ].map((value) => (
+                  <option key={value}>{value}</option>
+                ))}
+              </select>
+            </Field>
+            <Field label="Grid attribution">
+              <select name="gridAttribution" defaultValue="unknown">
+                {[
+                  "electricity_maps_data_center",
+                  "physical_grid",
+                  "regional_proxy",
+                  "operator_declared",
+                  "unknown",
+                  "simulated",
+                ].map((value) => (
+                  <option key={value}>{value}</option>
+                ))}
+              </select>
+            </Field>
             <Field label="Context window">
               <input
                 required
@@ -1243,7 +1292,7 @@ function EndpointsView() {
               />
             </Field>
             <Field label="Energy evidence">
-              <select name="energyEvidence">
+              <select name="energyEvidence" defaultValue="estimated">
                 {["measured", "estimated", "stale", "simulated"].map(
                   (value) => (
                     <option key={value}>{value}</option>
@@ -1351,6 +1400,7 @@ function EndpointsView() {
                     "Provider",
                     "Physical model",
                     "Region",
+                    "Grid claim",
                     "Tier",
                     "Health",
                     "p95",
@@ -1374,6 +1424,7 @@ function EndpointsView() {
                     <td>{item.provider}</td>
                     <td>{item.physicalModel}</td>
                     <td>{item.region}</td>
+                    <td>{item.gridAttribution ?? "unknown"}</td>
                     <td>{item.qualityTier}</td>
                     <td>
                       <span className={`status-pill ${item.healthState}`}>
@@ -1433,13 +1484,20 @@ function EndpointsView() {
       </section>
       {testResult ? (
         <div
-          className={`notice ${testResult.status === "healthy" ? "" : "warning"}`}
+          className={`notice ${
+            testResult.status === "healthy" && testResult.carbonAccountingAvailable
+              ? ""
+              : "warning"
+          }`}
         >
           <CheckCircle2 />
           <strong>{testResult.status}</strong>
           <span>
             {testResult.providerModel ?? testResult.error} ·{" "}
-            {testResult.latencyMs} ms
+            {testResult.latencyMs} ms ·{" "}
+            {testResult.carbonAccountingAvailable
+              ? `${testResult.grid?.intensity_gco2_kwh} gCO₂e/kWh (${testResult.gridAttribution})`
+              : "carbon accounting unavailable"}
           </span>
         </div>
       ) : null}
@@ -1524,6 +1582,60 @@ function EndpointsView() {
                 name="gridZone"
                 defaultValue={editingEndpoint.gridZone}
               />
+            </Field>
+            <Field label="Grid lookup">
+              <select
+                name="gridLookupMode"
+                defaultValue={editingEndpoint.gridLookupMode ?? "zone"}
+              >
+                <option value="zone">Exact zone key</option>
+                <option value="data_center">Electricity Maps data center</option>
+              </select>
+            </Field>
+            <Field label="Data-center provider">
+              <input
+                name="gridDataCenterProvider"
+                defaultValue={editingEndpoint.gridDataCenterProvider ?? ""}
+              />
+            </Field>
+            <Field label="Data-center region">
+              <input
+                name="gridDataCenterRegion"
+                defaultValue={editingEndpoint.gridDataCenterRegion ?? ""}
+              />
+            </Field>
+            <Field label="Processing-location evidence">
+              <select
+                name="processingLocationEvidence"
+                defaultValue={editingEndpoint.processingLocationEvidence ?? "unknown"}
+              >
+                {[
+                  "provider_contract",
+                  "operator_declared",
+                  "self_hosted",
+                  "unknown",
+                  "simulated",
+                ].map((value) => (
+                  <option key={value}>{value}</option>
+                ))}
+              </select>
+            </Field>
+            <Field label="Grid attribution">
+              <select
+                name="gridAttribution"
+                defaultValue={editingEndpoint.gridAttribution ?? "unknown"}
+              >
+                {[
+                  "electricity_maps_data_center",
+                  "physical_grid",
+                  "regional_proxy",
+                  "operator_declared",
+                  "unknown",
+                  "simulated",
+                ].map((value) => (
+                  <option key={value}>{value}</option>
+                ))}
+              </select>
             </Field>
             <Field label="Context window">
               <input
@@ -3845,7 +3957,9 @@ function AuditView() {
                   <small>{item.route ?? item.endpoint ?? "unknown"}</small>
                   <em>
                     ${Number(item.costUsd ?? 0).toFixed(5)} ·{" "}
-                    {Number(item.carbonGrams ?? 0).toFixed(3)} g
+                    {item.carbonAccountingAvailable
+                      ? `${Number(item.carbonGrams).toFixed(3)} g`
+                      : "carbon unavailable"}
                   </em>
                   {evidence(item.evidence)}
                 </span>
@@ -3911,7 +4025,11 @@ function AuditView() {
               <section>
                 <h3>2 · Candidate selection</h3>
                 {detail.data.routeDecision?.candidates?.map(
-                  (candidate: Item) => (
+                  (candidate: Item) => {
+                    const carbon =
+                      candidate.estimated_carbon_g ??
+                      candidate.estimatedCarbonG;
+                    return (
                     <div
                       className={`candidate ${(candidate.excluded_reason ?? candidate.excludedReason) ? "excluded" : ""}`}
                       key={candidate.endpoint_id ?? candidate.endpointId}
@@ -3923,14 +4041,13 @@ function AuditView() {
                           `score ${candidate.score}`}
                       </span>
                       <small>
-                        {candidate.estimated_carbon_g ??
-                          candidate.estimatedCarbonG}{" "}
-                        g · $
+                        {carbon == null ? "carbon unavailable" : `${carbon} g`} · $
                         {candidate.estimated_cost_usd ??
                           candidate.estimatedCostUsd}
                       </small>
                     </div>
-                  ),
+                    );
+                  },
                 )}
               </section>
               <section>
@@ -3955,7 +4072,9 @@ function AuditView() {
                     <dd>{value.strategy}</dd>
                     <dt>Baseline → actual carbon</dt>
                     <dd>
-                      {value.baselineCarbonG} → {value.actualCarbonG} g
+                      {value.carbonAccountingAvailable
+                        ? `${value.baselineCarbonG} → ${value.actualCarbonG} g`
+                        : "Unavailable — grid/location evidence was insufficient"}
                     </dd>
                     <dt>Energy</dt>
                     <dd>
@@ -4045,6 +4164,9 @@ function ReportsView() {
   }
   const baseline = Number(summary.data?.baselineCarbonGrams ?? 0);
   const actual = Number(summary.data?.actualCarbonGrams ?? 0);
+  const carbonAvailable = Boolean(
+    summary.data && summary.data.carbonOutcome !== "unavailable",
+  );
   const evidenceCounts = summary.data?.evidenceCounts ?? {};
   return (
     <div className="page">
@@ -4141,27 +4263,31 @@ function ReportsView() {
       <div className="metric-grid">
         <div className="metric">
           <span>Baseline carbon</span>
-          <strong>{baseline.toFixed(3)} g</strong>
+          <strong>{carbonAvailable ? `${baseline.toFixed(3)} g` : "Unavailable"}</strong>
           <small>configured baseline endpoints</small>
         </div>
         <div className="metric">
           <span>Actual carbon</span>
-          <strong>{actual.toFixed(3)} g</strong>
+          <strong>{carbonAvailable ? `${actual.toFixed(3)} g` : "Unavailable"}</strong>
           <small>operational attribution</small>
         </div>
         <div className="metric">
           <span>
             {summary.data?.carbonOutcome === "increase"
               ? "Carbon increase"
+              : summary.data?.carbonOutcome === "unavailable"
+                ? "Carbon unavailable"
               : "Avoided"}
           </span>
           <strong>
-            {Math.abs(Number(summary.data?.rawCarbonDeltaGrams ?? 0)).toFixed(
-              3,
-            )}{" "}
-            g
+            {carbonAvailable
+              ? `${Math.abs(Number(summary.data?.rawCarbonDeltaGrams ?? 0)).toFixed(3)} g`
+              : "Unavailable"}
           </strong>
-          <small>raw baseline delta</small>
+          <small>
+            {summary.data?.carbonUnavailableRequests ?? 0} request(s) excluded
+            for missing grid/location evidence
+          </small>
         </div>
         <div className="metric">
           <span>Cost delta</span>
@@ -4190,18 +4316,22 @@ function ReportsView() {
           <div className="comparison-bars">
             <div>
               <span>Baseline</span>
-              <i style={{ width: "100%" }} />
-              <strong>{baseline.toFixed(3)} g</strong>
+              <i style={{ width: carbonAvailable ? "100%" : "0%" }} />
+              <strong>
+                {carbonAvailable ? `${baseline.toFixed(3)} g` : "Unavailable"}
+              </strong>
             </div>
             <div>
               <span>Actual</span>
               <i
                 className="actual"
                 style={{
-                  width: `${baseline ? Math.min(100, (actual / baseline) * 100) : 0}%`,
+                  width: `${carbonAvailable && baseline ? Math.min(100, (actual / baseline) * 100) : 0}%`,
                 }}
               />
-              <strong>{actual.toFixed(3)} g</strong>
+              <strong>
+                {carbonAvailable ? `${actual.toFixed(3)} g` : "Unavailable"}
+              </strong>
             </div>
           </div>
           <div className="evidence-summary">
@@ -4216,7 +4346,7 @@ function ReportsView() {
           <div className="panel-heading">
             <div>
               <h2>Methodology & uncertainty</h2>
-              <p>{summary.data?.methodologyVersion ?? "ecoroute-v1"}</p>
+              <p>{summary.data?.methodologyVersion ?? "ecoroute-v2"}</p>
             </div>
           </div>
           <ul>
@@ -4245,19 +4375,14 @@ function SettingsView() {
   const client = useQueryClient();
   const zones = useQuery({
     queryKey: ["carbon-zones"],
-    queryFn: () => api<List>("/carbon/zones"),
+    queryFn: () => api<List & { provider?: string }>("/carbon/zones"),
   });
   const refresh = useMutation({
     mutationFn: () =>
       api("/carbon/refresh", {
         method: "POST",
         headers: { "Idempotency-Key": idempotencyKey("carbon") },
-        body: JSON.stringify({
-          zones: zones.data?.items.map((item) => item.zone) ?? [
-            "demo-local",
-            "demo-remote",
-          ],
-        }),
+        body: JSON.stringify({}),
       }),
     onSuccess: () =>
       void client.invalidateQueries({ queryKey: ["carbon-zones"] }),
@@ -4280,7 +4405,7 @@ function SettingsView() {
             <h2>Carbon zones</h2>
             <p>
               Background refresh every two minutes; request path uses a
-              five-minute cache.
+              five-minute cache. Provider: {zones.data?.provider ?? "unknown"}.
             </p>
           </div>
           <button className="secondary-button" onClick={() => refresh.mutate()}>
@@ -4292,20 +4417,21 @@ function SettingsView() {
         ) : zones.data?.items.length ? (
           <div className="settings-grid">
             {zones.data.items.map((item) => (
-            <article key={item.zone}>
-              <div>
-                <strong>{item.zone}</strong>
-                {evidence(item.evidence)}
-              </div>
-              <span>
-                {item.intensityGco2Kwh ?? item.intensity_gco2_kwh} gCO₂e/kWh
-              </span>
-              <small>
-                {item.source} · observed{" "}
-                {formatUtc(item.observedAt ?? item.observed_at)} ·{" "}
-                {item.freshnessSeconds ?? 0}s old
-              </small>
-            </article>
+              <article key={`${item.zone}|${item.lookupKey ?? "zone"}`}>
+                <div>
+                  <strong>{item.zone}</strong>
+                  {evidence(item.evidence)}
+                </div>
+                <span>
+                  {item.intensityGco2Kwh ?? item.intensity_gco2_kwh} gCO₂e/kWh
+                </span>
+                <small>
+                  {item.lookupKey ?? "zone"} · {item.source} · observed{" "}
+                  {formatUtc(item.observedAt ?? item.observed_at)} ·{" "}
+                  {item.freshnessSeconds ?? 0}s old
+                  {item.metadata?.is_estimated ? " · provider-estimated" : ""}
+                </small>
+              </article>
             ))}
           </div>
         ) : (
@@ -4358,8 +4484,8 @@ function SettingsView() {
             ],
             [
               "Electricity data",
-              "CARBON_AWARE_BASE_URL",
-              "Cached, timestamped, stale-safe",
+              "ELECTRICITY_MAPS_API_KEY or CARBON_AWARE_BASE_URL",
+              "Electricity Maps v4 is preferred in auto mode; timestamped and stale-safe",
             ],
             [
               "Hugging Face export",

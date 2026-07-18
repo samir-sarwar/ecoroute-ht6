@@ -27,6 +27,10 @@ def endpoint(
     region: str = "unknown",
     self_hosted: bool = False,
     carbon_available: bool = True,
+    energy_evidence: str = "simulated",
+    carbon_evidence: str = "simulated",
+    processing_location_evidence: str = "simulated",
+    grid_attribution: str = "simulated",
 ) -> EndpointCandidate:
     return EndpointCandidate(
         id=uuid.uuid5(uuid.NAMESPACE_DNS, name),
@@ -40,7 +44,7 @@ def endpoint(
         fixed_request_kwh={"frontier": 0.001, "small": 0.0002, "specialized": 0.0001}[tier],
         input_kwh_per_1k_tokens=0.001,
         output_kwh_per_1k_tokens=0.002,
-        energy_evidence="simulated",
+        energy_evidence=energy_evidence,
         latency_p95_ms=latency,
         grid_intensity=intensity,
         enabled=enabled,
@@ -49,6 +53,9 @@ def endpoint(
         carbon_available=carbon_available,
         region=region,
         self_hosted=self_hosted,
+        carbon_evidence=carbon_evidence,
+        processing_location_evidence=processing_location_evidence,
+        grid_attribution=grid_attribution,
     )
 
 
@@ -157,8 +164,46 @@ def test_unknown_carbon_never_looks_like_zero_emissions() -> None:
     )
     assert selected.id == known.id
     assert (
-        next(item for item in snapshots if item.endpoint_id == unknown.id).estimated_carbon_g == 0
+        next(item for item in snapshots if item.endpoint_id == unknown.id).estimated_carbon_g
+        is None
     )
+
+
+def test_equal_routes_prefer_stronger_location_and_grid_evidence() -> None:
+    verified = endpoint(
+        "verified-location",
+        "small",
+        200,
+        "1",
+        energy_evidence="estimated",
+        carbon_evidence="measured",
+        processing_location_evidence="provider_contract",
+        grid_attribution="electricity_maps_data_center",
+    )
+    declared = endpoint(
+        "declared-location",
+        "small",
+        200,
+        "1",
+        energy_evidence="estimated",
+        carbon_evidence="measured",
+        processing_location_evidence="operator_declared",
+        grid_attribution="operator_declared",
+    )
+    policy = RoutingPolicyConfig(
+        preset="custom",
+        max_cost_increase_pct=100,
+        weights=RoutingWeights(carbon=0, cost=0, latency=0, quality=0, evidence=1),
+        enabled_endpoint_ids=[verified.id, declared.id],
+    )
+
+    selected, snapshots, _ = select_candidate(
+        [declared, verified], context(), low(), policy, declared, declared.id
+    )
+
+    assert selected.id == verified.id
+    verified_snapshot = next(item for item in snapshots if item.endpoint_id == verified.id)
+    assert verified_snapshot.grid_attribution == "electricity_maps_data_center"
 
 
 def test_routing_constraints_fail_closed_with_specific_reasons() -> None:

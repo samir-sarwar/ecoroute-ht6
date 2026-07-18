@@ -47,6 +47,13 @@ class Settings(BaseSettings):
     gemini_dataset_model: str = Field("gemini-2.5-flash", validation_alias="GEMINI_DATASET_MODEL")
     openai_api_key: str = Field("", validation_alias="OPENAI_API_KEY")
     electricity_maps_api_key: str = Field("", validation_alias="ELECTRICITY_MAPS_API_KEY")
+    electricity_maps_base_url: str = Field(
+        "https://api.electricitymaps.com/v4",
+        validation_alias="ELECTRICITY_MAPS_BASE_URL",
+    )
+    carbon_provider: Literal["auto", "electricity_maps", "carbon_aware"] = Field(
+        "auto", validation_alias="ECOROUTE_CARBON_PROVIDER"
+    )
     ollama_base_url: str = Field(
         "http://host.docker.internal:11434/v1", validation_alias="OLLAMA_BASE_URL"
     )
@@ -60,6 +67,12 @@ class Settings(BaseSettings):
     provider_timeout_seconds: int = Field(45, validation_alias="ECOROUTE_PROVIDER_TIMEOUT_SECONDS")
     stream_timeout_seconds: int = Field(120, validation_alias="ECOROUTE_STREAM_TIMEOUT_SECONDS")
     carbon_cache_seconds: int = Field(300, validation_alias="ECOROUTE_CARBON_CACHE_SECONDS")
+    carbon_request_timeout_seconds: float = Field(
+        5.0, validation_alias="ECOROUTE_CARBON_REQUEST_TIMEOUT_SECONDS", gt=0, le=30
+    )
+    carbon_freshness_target_minutes: int = Field(
+        15, validation_alias="ECOROUTE_CARBON_FRESHNESS_TARGET_MINUTES", ge=1, le=60
+    )
     cache_max_entries: int = Field(10_000, validation_alias="ECOROUTE_CACHE_MAX_ENTRIES")
     cache_lookup_kwh: float = Field(0.000001, validation_alias="ECOROUTE_CACHE_LOOKUP_KWH")
     max_request_body_bytes: int = Field(
@@ -68,7 +81,8 @@ class Settings(BaseSettings):
     max_sse_connections: int = Field(100, validation_alias="ECOROUTE_MAX_SSE_CONNECTIONS")
     allowed_endpoint_hosts: str = Field("", validation_alias="ECOROUTE_ALLOWED_ENDPOINT_HOSTS")
     allowed_credential_envs: str = Field(
-        "FREESOLO_API_KEY,GEMINI_API_KEY,OPENAI_API_KEY,OLLAMA_API_KEY,VLLM_API_KEY",
+        "FREESOLO_API_KEY,GEMINI_API_KEY,OPENAI_API_KEY,OPENAI_US_API_KEY,"
+        "OPENAI_EU_API_KEY,OLLAMA_API_KEY,VLLM_API_KEY",
         validation_alias="ECOROUTE_ALLOWED_CREDENTIAL_ENVS",
     )
     agent_approved_controls: str = Field(

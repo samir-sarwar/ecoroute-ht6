@@ -198,3 +198,70 @@ def test_node_agent_attachment_requires_self_hosted_endpoint() -> None:
     payload["selfHosted"] = True
     value = ModelEndpointCreate.model_validate(payload)
     assert value.node_agent_id is not None
+
+
+def test_openai_provider_contract_requires_matching_regional_endpoint() -> None:
+    payload = endpoint_payload("https://api.openai.com/v1")
+    payload.update(
+        {
+            "provider": "openai",
+            "region": "us",
+            "processingLocationEvidence": "provider_contract",
+            "gridAttribution": "regional_proxy",
+        }
+    )
+    with pytest.raises(ValidationError, match="regional API hostname"):
+        ModelEndpointCreate.model_validate(payload)
+
+    payload["baseUrl"] = "https://us.api.openai.com/v1"
+    value = ModelEndpointCreate.model_validate(payload)
+    assert value.processing_location_evidence == "provider_contract"
+
+    payload["region"] = "eu"
+    with pytest.raises(ValidationError, match="regional API hostname"):
+        ModelEndpointCreate.model_validate(payload)
+
+
+def test_data_center_grid_lookup_requires_complete_electricity_maps_mapping() -> None:
+    payload = endpoint_payload("https://example.com/v1")
+    payload.update(
+        {
+            "gridLookupMode": "data_center",
+            "processingLocationEvidence": "operator_declared",
+            "gridAttribution": "electricity_maps_data_center",
+        }
+    )
+    with pytest.raises(ValidationError, match="gridDataCenterProvider"):
+        ModelEndpointCreate.model_validate(payload)
+
+    payload.update(
+        {
+            "gridDataCenterProvider": "gcp",
+            "gridDataCenterRegion": "europe-west1",
+        }
+    )
+    value = ModelEndpointCreate.model_validate(payload)
+    assert value.grid_lookup_mode == "data_center"
+
+
+def test_hosted_endpoint_energy_cannot_be_labeled_measured() -> None:
+    payload = endpoint_payload("https://example.com/v1")
+    payload["energyEvidence"] = "measured"
+    with pytest.raises(ValidationError, match="hosted endpoint energy"):
+        ModelEndpointCreate.model_validate(payload)
+
+
+def test_physical_grid_claim_requires_self_hosted_location_evidence() -> None:
+    payload = endpoint_payload("https://example.com/v1")
+    payload["gridAttribution"] = "physical_grid"
+    with pytest.raises(ValidationError, match="physical-grid attribution"):
+        ModelEndpointCreate.model_validate(payload)
+
+    payload.update(
+        {
+            "selfHosted": True,
+            "processingLocationEvidence": "self_hosted",
+        }
+    )
+    value = ModelEndpointCreate.model_validate(payload)
+    assert value.grid_attribution == "physical_grid"

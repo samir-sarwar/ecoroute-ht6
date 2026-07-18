@@ -17,6 +17,7 @@ from ecoroute.api.auth import require_gateway_key
 from ecoroute.api.errors import EcoRouteError
 from ecoroute.api.events import publish_event
 from ecoroute.api.schemas import (
+    CarbonReading,
     ChatCompletionRequest,
     QualityVerdict,
     RouterClassification,
@@ -67,13 +68,55 @@ async def _redis_text(redis: Redis, key: str, default: str) -> str:
     return value or default
 
 
+def _carbon_lookup(endpoint: ModelEndpoint) -> dict[str, str | None]:
+    if endpoint.grid_lookup_mode != "data_center":
+        return {}
+    return {
+        "data_center_provider": endpoint.grid_data_center_provider,
+        "data_center_region": endpoint.grid_data_center_region,
+    }
+
+
+def _carbon_accounting_available(endpoint: ModelEndpoint, reading: CarbonReading) -> bool:
+    if (
+        reading.source == "ecoroute-default-no-reading"
+        or reading.metadata.get("available") is False
+        or endpoint.grid_attribution == "unknown"
+        or endpoint.processing_location_evidence == "unknown"
+    ):
+        return False
+    lookup_mode = reading.metadata.get("lookup_mode")
+    if endpoint.grid_lookup_mode != "data_center":
+        return lookup_mode in {None, "zone"}
+    expected_provider = (endpoint.grid_data_center_provider or "").casefold()
+    expected_region = (endpoint.grid_data_center_region or "").casefold().replace("_", "-")
+    reading_provider = str(reading.metadata.get("data_center_provider") or "").casefold()
+    reading_region = (
+        str(reading.metadata.get("data_center_region") or "").casefold().replace("_", "-")
+    )
+    return bool(
+        lookup_mode == "data_center"
+        and reading_provider == expected_provider
+        and reading_region == expected_region
+    )
+
+
+def _claim_scope(endpoint: ModelEndpoint) -> str:
+    return {
+        "electricity_maps_data_center": "mapped_data_center_grid_operational_estimate",
+        "physical_grid": "physical_grid_operational_estimate",
+        "regional_proxy": "provider_region_grid_proxy_operational_estimate",
+        "operator_declared": "operator_declared_grid_operational_estimate",
+        "simulated": "simulated_operational_estimate",
+    }.get(endpoint.grid_attribution, "unavailable")
+
+
 def _candidate(
     endpoint: ModelEndpoint,
-    intensity: float,
+    reading: CarbonReading,
     profile: SlmProfile | None = None,
-    *,
-    carbon_available: bool = True,
 ) -> EndpointCandidate:
+    carbon_available = _carbon_accounting_available(endpoint, reading)
     return EndpointCandidate(
         id=endpoint.id,
         name=endpoint.name,
@@ -88,13 +131,18 @@ def _candidate(
         output_kwh_per_1k_tokens=endpoint.output_kwh_per_1k_tokens,
         energy_evidence=endpoint.energy_evidence,
         latency_p95_ms=endpoint.latency_p95_ms,
-        grid_intensity=intensity,
+        grid_intensity=reading.intensity_gco2_kwh,
         region=endpoint.region,
         self_hosted=endpoint.self_hosted,
         enabled=endpoint.enabled,
         health_state=endpoint.health_state,
         slm_profile_id=endpoint.slm_profile_id,
         carbon_available=carbon_available,
+        grid_zone=reading.zone,
+        carbon_evidence=reading.evidence,
+        carbon_source=reading.source,
+        processing_location_evidence=endpoint.processing_location_evidence,
+        grid_attribution=endpoint.grid_attribution,
         slm_profile_status=profile.status if profile else None,
         allowed_task_types=frozenset(profile.definition.get("allowed_tasks", []))
         if profile
@@ -103,6 +151,44 @@ def _candidate(
         if profile
         else frozenset({"en"}),
     )
+
+
+def _impact_evidence(
+    baseline: EndpointCandidate,
+    baseline_endpoint: ModelEndpoint,
+    baseline_reading: CarbonReading,
+    selected: EndpointCandidate,
+    selected_endpoint: ModelEndpoint,
+    selected_reading: CarbonReading,
+) -> dict[str, Any]:
+    evidence_rank = {"measured": 0, "estimated": 1, "stale": 2, "simulated": 3}
+    carbon_level = max(
+        (baseline_reading.evidence, selected_reading.evidence),
+        key=lambda value: evidence_rank[value],
+    )
+    return {
+        "energy_level": selected.energy_evidence,
+        "carbon_level": carbon_level,
+        "energy_source": selected_endpoint.name + ":" + selected_endpoint.coefficient_version,
+        "coefficient_version": selected_endpoint.coefficient_version,
+        "carbon_source": selected_reading.source,
+        "carbon_observed_at": selected_reading.observed_at.isoformat(),
+        "carbon_metadata": selected_reading.metadata,
+        "grid_zone": selected_reading.zone,
+        "endpoint_region": selected_endpoint.region,
+        "processing_location_evidence": selected_endpoint.processing_location_evidence,
+        "grid_attribution": selected_endpoint.grid_attribution,
+        "baseline_carbon_source": baseline_reading.source,
+        "baseline_carbon_observed_at": baseline_reading.observed_at.isoformat(),
+        "baseline_carbon_metadata": baseline_reading.metadata,
+        "baseline_grid_zone": baseline_reading.zone,
+        "baseline_endpoint_region": baseline_endpoint.region,
+        "baseline_processing_location_evidence": baseline_endpoint.processing_location_evidence,
+        "baseline_grid_attribution": baseline_endpoint.grid_attribution,
+        "carbon_accounting_available": baseline.carbon_available and selected.carbon_available,
+        "attribution_method": "endpoint_coefficients_times_region_grid_intensity",
+        "claim_scope": _claim_scope(selected_endpoint),
+    }
 
 
 async def _load_context(
@@ -172,6 +258,9 @@ def _headers(
     cache: str,
     evidence: str,
     fallback: bool,
+    *,
+    carbon_accounting_available: bool = True,
+    grid_attribution: str = "unknown",
 ) -> dict[str, str]:
     return {
         "X-Request-Id": str(request_id),
@@ -181,6 +270,10 @@ def _headers(
         "X-EcoRoute-Cache": cache,
         "X-EcoRoute-Evidence": evidence,
         "X-EcoRoute-Fallback": str(fallback).lower(),
+        "X-EcoRoute-Carbon-Accounting": (
+            "available" if carbon_accounting_available else "unavailable"
+        ),
+        "X-EcoRoute-Grid-Attribution": grid_attribution,
     }
 
 
@@ -250,14 +343,11 @@ async def _complete_cache_hit(
     kind: str,
     logical: LogicalModel,
     workspace: Workspace,
-    evidence: str,
     source_endpoint_id: uuid.UUID,
     baseline_energy: float,
     baseline_cost: Decimal,
-    current_intensity: float,
-    carbon_evidence: str,
-    carbon_source: str,
-    carbon_observed_at: str,
+    baseline_endpoint: ModelEndpoint,
+    baseline_reading: CarbonReading,
 ) -> dict[str, Any]:
     fresh = freshen_cached_completion(completion)
     request_row.status = "completed"
@@ -269,8 +359,9 @@ async def _complete_cache_hit(
         (request_row.completed_at - request_row.started_at).total_seconds() * 1000
     )
     lookup_energy = settings.cache_lookup_kwh
-    intensity = current_intensity
+    intensity = baseline_reading.intensity_gco2_kwh
     actual_energy = lookup_energy
+    carbon_available = _carbon_accounting_available(baseline_endpoint, baseline_reading)
     session.add(
         ImpactRecord(
             request_id=request_row.id,
@@ -282,14 +373,22 @@ async def _complete_cache_hit(
             raw_carbon_delta_g=(baseline_energy - actual_energy) * intensity,
             baseline_cost_usd=baseline_cost,
             actual_cost_usd=Decimal(0),
+            carbon_accounting_available=carbon_available,
             evidence={
                 "energy_level": "estimated",
-                "carbon_level": carbon_evidence,
+                "carbon_level": baseline_reading.evidence,
                 "energy_source": "configured-cache-lookup-coefficient",
-                "carbon_source": carbon_source,
+                "carbon_source": baseline_reading.source,
                 "coefficient_version": "cache-lookup-v1",
-                "carbon_observed_at": carbon_observed_at,
+                "carbon_observed_at": baseline_reading.observed_at.isoformat(),
+                "carbon_metadata": baseline_reading.metadata,
+                "grid_zone": baseline_reading.zone,
+                "endpoint_region": baseline_endpoint.region,
+                "processing_location_evidence": baseline_endpoint.processing_location_evidence,
+                "grid_attribution": baseline_endpoint.grid_attribution,
+                "carbon_accounting_available": carbon_available,
                 "attribution_method": "cache_avoidance",
+                "claim_scope": _claim_scope(baseline_endpoint),
             },
         )
     )
@@ -313,9 +412,10 @@ async def _complete_cache_hit(
         (request_row.duration_ms or 0) / 1000
     )
     metrics.ENERGY.labels("cache", "estimated").inc(settings.cache_lookup_kwh)
-    metrics.AVOIDED_CARBON.labels("cache", carbon_evidence).inc(
-        max(0.0, (baseline_energy - settings.cache_lookup_kwh) * current_intensity)
-    )
+    if carbon_available:
+        metrics.AVOIDED_CARBON.labels("cache", baseline_reading.evidence).inc(
+            max(0.0, (baseline_energy - settings.cache_lookup_kwh) * intensity)
+        )
     return fresh
 
 
@@ -397,6 +497,7 @@ async def chat_completions(
                 baseline_endpoint.grid_zone,
                 demo_scenario=scenario if settings.demo_mode else None,
                 allow_stale_minutes=policy.allow_stale_carbon_minutes,
+                **_carbon_lookup(baseline_endpoint),
             )
             completion = await _complete_cache_hit(
                 session=session,
@@ -406,14 +507,11 @@ async def chat_completions(
                 kind="exact",
                 logical=logical,
                 workspace=workspace,
-                evidence=baseline_reading.evidence,
                 source_endpoint_id=uuid.UUID(hit["source_endpoint_id"]),
                 baseline_energy=float(hit["baseline_energy_kwh"]),
                 baseline_cost=Decimal(hit["baseline_cost_usd"]),
-                current_intensity=baseline_reading.intensity_gco2_kwh,
-                carbon_evidence=baseline_reading.evidence,
-                carbon_source=baseline_reading.source,
-                carbon_observed_at=baseline_reading.observed_at.isoformat(),
+                baseline_endpoint=baseline_endpoint,
+                baseline_reading=baseline_reading,
             )
             await session.commit()
             headers = _headers(
@@ -423,6 +521,10 @@ async def chat_completions(
                 "exact",
                 baseline_reading.evidence,
                 False,
+                carbon_accounting_available=_carbon_accounting_available(
+                    baseline_endpoint, baseline_reading
+                ),
+                grid_attribution=baseline_endpoint.grid_attribution,
             )
             if body.stream:
                 return await _stream_response(
@@ -455,6 +557,7 @@ async def chat_completions(
                 baseline_endpoint.grid_zone,
                 demo_scenario=scenario if settings.demo_mode else None,
                 allow_stale_minutes=policy.allow_stale_carbon_minutes,
+                **_carbon_lookup(baseline_endpoint),
             )
             completion = await _complete_cache_hit(
                 session=session,
@@ -464,14 +567,11 @@ async def chat_completions(
                 kind="semantic",
                 logical=logical,
                 workspace=workspace,
-                evidence=baseline_reading.evidence,
                 source_endpoint_id=semantic.source_endpoint_id,
                 baseline_energy=semantic.baseline_energy_kwh,
                 baseline_cost=semantic.baseline_cost_usd,
-                current_intensity=baseline_reading.intensity_gco2_kwh,
-                carbon_evidence=baseline_reading.evidence,
-                carbon_source=baseline_reading.source,
-                carbon_observed_at=baseline_reading.observed_at.isoformat(),
+                baseline_endpoint=baseline_endpoint,
+                baseline_reading=baseline_reading,
             )
             await session.commit()
             headers = _headers(
@@ -481,6 +581,10 @@ async def chat_completions(
                 "semantic",
                 baseline_reading.evidence,
                 False,
+                carbon_accounting_available=_carbon_accounting_available(
+                    baseline_endpoint, baseline_reading
+                ),
+                grid_attribution=baseline_endpoint.grid_attribution,
             )
             if body.stream:
                 return await _stream_response(
@@ -501,18 +605,21 @@ async def chat_completions(
     scenario = await _redis_text(redis, "ecoroute:demo:grid", "moderate")
     carbon_service = CarbonService(settings, redis)
     readings = {
-        endpoint.grid_zone: await carbon_service.reading(
+        endpoint.id: await carbon_service.reading(
             session,
             endpoint.grid_zone,
             demo_scenario=scenario if settings.demo_mode else None,
             allow_stale_minutes=policy.allow_stale_carbon_minutes,
+            **_carbon_lookup(endpoint),
         )
         for endpoint in endpoint_rows
     }
-    for reading in readings.values():
-        metrics.GRID_INTENSITY.labels(reading.zone, reading.source, reading.evidence).set(
-            reading.intensity_gco2_kwh
-        )
+    for endpoint in endpoint_rows:
+        reading = readings[endpoint.id]
+        if _carbon_accounting_available(endpoint, reading):
+            metrics.GRID_INTENSITY.labels(reading.zone, reading.source, reading.evidence).set(
+                reading.intensity_gco2_kwh
+            )
     profile_ids = {endpoint.slm_profile_id for endpoint in endpoint_rows if endpoint.slm_profile_id}
     profiles = {
         profile.id: profile
@@ -523,13 +630,13 @@ async def chat_completions(
     candidates = [
         _candidate(
             endpoint,
-            readings[endpoint.grid_zone].intensity_gco2_kwh,
+            readings[endpoint.id],
             profiles.get(endpoint.slm_profile_id) if endpoint.slm_profile_id else None,
-            carbon_available=readings[endpoint.grid_zone].source != "ecoroute-default-no-reading",
         )
         for endpoint in endpoint_rows
     ]
     baseline = next(item for item in candidates if item.id == logical.baseline_endpoint_id)
+    baseline_row = next(item for item in endpoint_rows if item.id == baseline.id)
     assert logical.required_fallback_endpoint_id is not None
     try:
         selected, snapshots, selection_reason = select_candidate(
@@ -792,6 +899,8 @@ async def chat_completions(
                 input_tokens,
                 output_tokens,
                 router_energy_kwh=0.000002,
+                baseline_carbon_available=baseline.carbon_available,
+                selected_carbon_available=stream_selected.carbon_available,
             )
             completion = {
                 "id": completion_id,
@@ -841,18 +950,15 @@ async def chat_completions(
                         raw_carbon_delta_g=impact.raw_carbon_delta_g,
                         baseline_cost_usd=impact.baseline_cost_usd,
                         actual_cost_usd=impact.actual_cost_usd,
-                        evidence={
-                            "energy_level": stream_selected.energy_evidence,
-                            "carbon_level": readings[stream_selected_row.grid_zone].evidence,
-                            "energy_source": stream_selected_row.name
-                            + ":"
-                            + stream_selected_row.coefficient_version,
-                            "carbon_source": readings[stream_selected_row.grid_zone].source,
-                            "carbon_observed_at": readings[
-                                stream_selected_row.grid_zone
-                            ].observed_at.isoformat(),
-                            "attribution_method": "endpoint_coefficients_plus_router_overhead",
-                        },
+                        carbon_accounting_available=impact.carbon_accounting_available,
+                        evidence=_impact_evidence(
+                            baseline,
+                            baseline_row,
+                            readings[baseline.id],
+                            stream_selected,
+                            stream_selected_row,
+                            readings[stream_selected.id],
+                        ),
                     )
                 )
                 if exact_cache_eligible(features, policy, classification):
@@ -899,7 +1005,9 @@ async def chat_completions(
                     "route": stream_selected_row.name,
                     "cache": "miss",
                     "fallback": stream_fallback,
-                    "carbonGrams": impact.actual_carbon_g,
+                    "carbonGrams": (
+                        impact.actual_carbon_g if impact.carbon_accounting_available else None
+                    ),
                 },
             )
             metrics.REQUESTS.labels(body.model, stream_selected_row.name, "miss", "success").inc()
@@ -912,9 +1020,10 @@ async def chat_completions(
             metrics.ENERGY.labels(stream_selected_row.name, stream_selected.energy_evidence).inc(
                 impact.actual_energy_kwh
             )
-            metrics.CARBON.labels(
-                stream_selected_row.name, readings[stream_selected_row.grid_zone].evidence
-            ).inc(impact.actual_carbon_g)
+            if impact.carbon_accounting_available:
+                metrics.CARBON.labels(
+                    stream_selected_row.name, readings[stream_selected.id].evidence
+                ).inc(impact.actual_carbon_g)
             if include_usage and upstream_usage is None:
                 usage_chunk = {
                     "id": completion_id,
@@ -937,8 +1046,12 @@ async def chat_completions(
                 route_name,
                 stream_selected.id,
                 "miss",
-                readings[stream_selected_row.grid_zone].evidence,
+                readings[stream_selected.id].evidence,
                 stream_fallback,
+                carbon_accounting_available=(
+                    baseline.carbon_available and stream_selected.carbon_available
+                ),
+                grid_attribution=stream_selected_row.grid_attribution,
             ),
         )
 
@@ -1246,7 +1359,13 @@ async def chat_completions(
     input_tokens = int(usage.get("prompt_tokens", features.input_token_estimate))
     output_tokens = int(usage.get("completion_tokens", max(1, len(str(completion)) // 4)))
     impact = calculate_impact(
-        baseline, selected, input_tokens, output_tokens, router_energy_kwh=0.000002
+        baseline,
+        selected,
+        input_tokens,
+        output_tokens,
+        router_energy_kwh=0.000002,
+        baseline_carbon_available=baseline.carbon_available,
+        selected_carbon_available=selected.carbon_available,
     )
     row.status = "completed"
     row.output_tokens = output_tokens
@@ -1263,15 +1382,15 @@ async def chat_completions(
             raw_carbon_delta_g=impact.raw_carbon_delta_g,
             baseline_cost_usd=impact.baseline_cost_usd,
             actual_cost_usd=impact.actual_cost_usd,
-            evidence={
-                "energy_level": selected.energy_evidence,
-                "carbon_level": readings[selected_row.grid_zone].evidence,
-                "energy_source": selected.name + ":demo-v1",
-                "carbon_source": readings[selected_row.grid_zone].source,
-                "coefficient_version": selected_row.coefficient_version,
-                "carbon_observed_at": readings[selected_row.grid_zone].observed_at.isoformat(),
-                "attribution_method": "endpoint_coefficients_plus_router_overhead",
-            },
+            carbon_accounting_available=impact.carbon_accounting_available,
+            evidence=_impact_evidence(
+                baseline,
+                baseline_row,
+                readings[baseline.id],
+                selected,
+                selected_row,
+                readings[selected.id],
+            ),
         )
     )
     if exact_cache_eligible(features, policy, classification) and verdict.passed:
@@ -1319,7 +1438,7 @@ async def chat_completions(
             "route": selected_row.name,
             "cache": "miss",
             "fallback": fallback_used,
-            "carbonGrams": impact.actual_carbon_g,
+            "carbonGrams": impact.actual_carbon_g if impact.carbon_accounting_available else None,
         },
     )
     await session.commit()
@@ -1331,20 +1450,23 @@ async def chat_completions(
     metrics.TOKENS.labels("output", selected_row.name).inc(output_tokens)
     metrics.COST.labels(selected_row.name).inc(float(impact.actual_cost_usd))
     metrics.ENERGY.labels(selected_row.name, selected.energy_evidence).inc(impact.actual_energy_kwh)
-    metrics.CARBON.labels(selected_row.name, readings[selected_row.grid_zone].evidence).inc(
-        impact.actual_carbon_g
-    )
-    metrics.AVOIDED_CARBON.labels("end_to_end", readings[selected_row.grid_zone].evidence).inc(
-        impact.avoided_carbon_g
-    )
+    if impact.carbon_accounting_available:
+        metrics.CARBON.labels(selected_row.name, readings[selected.id].evidence).inc(
+            impact.actual_carbon_g
+        )
+        metrics.AVOIDED_CARBON.labels("end_to_end", readings[selected.id].evidence).inc(
+            impact.avoided_carbon_g
+        )
     route_name = "frontier" if selected.quality_tier == "frontier" else selected_row.name
     headers = _headers(
         request_id,
         route_name,
         selected.id,
         "miss",
-        readings[selected_row.grid_zone].evidence,
+        readings[selected.id].evidence,
         fallback_used,
+        carbon_accounting_available=impact.carbon_accounting_available,
+        grid_attribution=selected_row.grid_attribution,
     )
     if body.metadata and body.metadata.get("ecoroute_debug") == "true" and settings.demo_mode:
         completion["ecoroute"] = {

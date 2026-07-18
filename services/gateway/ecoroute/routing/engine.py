@@ -13,6 +13,21 @@ from ecoroute.api.schemas import (
 
 QUALITY_PENALTY = {"frontier": 0.0, "standard": 0.2, "small": 0.45, "specialized": 0.15}
 EVIDENCE_PENALTY = {"measured": 0.0, "estimated": 0.1, "stale": 0.3, "simulated": 0.4}
+PROCESSING_LOCATION_PENALTY = {
+    "provider_contract": 0.05,
+    "operator_declared": 0.3,
+    "self_hosted": 0.0,
+    "unknown": 0.5,
+    "simulated": 0.4,
+}
+GRID_ATTRIBUTION_PENALTY = {
+    "electricity_maps_data_center": 0.0,
+    "physical_grid": 0.0,
+    "regional_proxy": 0.25,
+    "operator_declared": 0.35,
+    "unknown": 0.5,
+    "simulated": 0.4,
+}
 
 
 @dataclass(frozen=True)
@@ -42,6 +57,20 @@ class EndpointCandidate:
         {"policy_qa", "summarization", "classification", "extraction", "reply_draft"}
     )
     supported_languages: frozenset[str] = frozenset({"en"})
+    grid_zone: str = "unknown"
+    carbon_evidence: str = "estimated"
+    carbon_source: str = "unknown"
+    processing_location_evidence: str = "unknown"
+    grid_attribution: str = "unknown"
+
+
+def evidence_penalty(candidate: EndpointCandidate) -> float:
+    return max(
+        EVIDENCE_PENALTY.get(candidate.energy_evidence, 0.5),
+        EVIDENCE_PENALTY.get(candidate.carbon_evidence, 0.5),
+        PROCESSING_LOCATION_PENALTY.get(candidate.processing_location_evidence, 0.5),
+        GRID_ATTRIBUTION_PENALTY.get(candidate.grid_attribution, 0.5),
+    )
 
 
 def estimate_cost(candidate: EndpointCandidate, input_tokens: int, output_tokens: int) -> Decimal:
@@ -144,12 +173,17 @@ def select_candidate(
             quality_tier=candidate.quality_tier,
             estimated_energy_kwh=energy,
             estimated_cost_usd=cost,
-            estimated_carbon_g=energy * candidate.grid_intensity
-            if candidate.carbon_available
-            else 0.0,
+            estimated_carbon_g=(
+                energy * candidate.grid_intensity if candidate.carbon_available else None
+            ),
             latency_p95_ms=candidate.latency_p95_ms,
             evidence=candidate.energy_evidence,
             region=candidate.region,
+            grid_zone=candidate.grid_zone,
+            carbon_evidence=candidate.carbon_evidence,
+            processing_location_evidence=candidate.processing_location_evidence,
+            grid_attribution=candidate.grid_attribution,
+            carbon_source=candidate.carbon_source,
         )
         reason: str | None = None
         if not candidate.enabled:
@@ -259,7 +293,7 @@ def select_candidate(
     available_carbon_values = [
         snapshot.estimated_carbon_g
         for candidate, snapshot in eligible
-        if candidate.carbon_available
+        if candidate.carbon_available and snapshot.estimated_carbon_g is not None
     ]
     normalized_available = _normalized(available_carbon_values) if available_carbon_values else []
     available_iter = iter(normalized_available)
@@ -280,7 +314,7 @@ def select_candidate(
             + policy.weights.cost * costs[index]
             + policy.weights.latency * latencies[index]
             + policy.weights.quality * QUALITY_PENALTY[candidate.quality_tier]
-            + policy.weights.evidence * EVIDENCE_PENALTY[candidate.energy_evidence]
+            + policy.weights.evidence * evidence_penalty(candidate)
         )
     minimum_score = min(item[1].score or 0 for item in eligible)
     tied = [item for item in eligible if (item[1].score or 0) - minimum_score <= 0.01 + 1e-12]

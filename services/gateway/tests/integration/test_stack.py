@@ -116,14 +116,14 @@ async def test_ephemeral_stack_contracts() -> None:
         )
         assert summary.status_code == 200
         assert summary.json()["requestCount"] >= 3
-        assert summary.json()["methodologyVersion"] == "ecoroute-v1"
+        assert summary.json()["methodologyVersion"] == "ecoroute-v2"
         csv_export = await client.get(
             "/api/v1/reports/requests.csv",
             headers=headers,
             params={"from": from_time, "to": to_time, "route": "cache"},
         )
         assert csv_export.status_code == 200
-        assert csv_export.headers["x-ecoroute-methodology-version"] == "ecoroute-v1"
+        assert csv_export.headers["x-ecoroute-methodology-version"] == "ecoroute-v2"
         assert "generated" not in csv_export.text.splitlines()[0].lower()
         assert any(",cache," in line for line in csv_export.text.splitlines()[1:])
         impact_export = await client.post(

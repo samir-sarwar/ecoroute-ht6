@@ -21,9 +21,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ecoroute.api.auth import require_agent_token, require_gateway_key
 from ecoroute.api.errors import EcoRouteError
 from ecoroute.api.events import publish_event
-from ecoroute.api.gateway import _candidate
+from ecoroute.api.gateway import (
+    _candidate,
+    _carbon_accounting_available,
+    _carbon_lookup,
+)
 from ecoroute.api.schemas import (
     AgentRegistration,
+    CarbonReading,
     ChatCompletionRequest,
     ChatMessage,
     ModelEndpointCreate,
@@ -32,7 +37,11 @@ from ecoroute.api.schemas import (
     TelemetryPayload,
 )
 from ecoroute.cache.embeddings import cosine_similarity, get_local_embedder
-from ecoroute.carbon.providers import FixtureCarbonProvider
+from ecoroute.carbon.providers import (
+    FixtureCarbonProvider,
+    configured_carbon_provider_name,
+)
+from ecoroute.carbon.service import CarbonService
 from ecoroute.config import get_settings
 from ecoroute.db.base import utcnow, uuid7
 from ecoroute.db.models import (
@@ -354,6 +363,11 @@ def _endpoint_json(endpoint: ModelEndpoint) -> dict[str, Any]:
         "physicalModel": endpoint.physical_model,
         "region": endpoint.region,
         "gridZone": endpoint.grid_zone,
+        "gridLookupMode": endpoint.grid_lookup_mode,
+        "gridDataCenterProvider": endpoint.grid_data_center_provider,
+        "gridDataCenterRegion": endpoint.grid_data_center_region,
+        "processingLocationEvidence": endpoint.processing_location_evidence,
+        "gridAttribution": endpoint.grid_attribution,
         "qualityTier": endpoint.quality_tier,
         "capabilities": endpoint.capabilities,
         "contextWindowTokens": endpoint.context_window_tokens,
@@ -417,10 +431,23 @@ async def overview(
     impact = (
         await session.execute(
             select(
-                func.coalesce(func.sum(ImpactRecord.actual_carbon_g), 0),
-                func.coalesce(func.sum(ImpactRecord.raw_carbon_delta_g), 0),
+                func.coalesce(
+                    func.sum(ImpactRecord.actual_carbon_g).filter(
+                        ImpactRecord.carbon_accounting_available.is_(True)
+                    ),
+                    0,
+                ),
+                func.coalesce(
+                    func.sum(ImpactRecord.raw_carbon_delta_g).filter(
+                        ImpactRecord.carbon_accounting_available.is_(True)
+                    ),
+                    0,
+                ),
                 func.coalesce(func.sum(ImpactRecord.actual_cost_usd), 0),
                 func.coalesce(func.sum(ImpactRecord.baseline_cost_usd), 0),
+                func.count(ImpactRecord.id).filter(
+                    ImpactRecord.carbon_accounting_available.is_(True)
+                ),
             ).where(ImpactRecord.created_at >= since)
         )
     ).one()
@@ -434,8 +461,32 @@ async def overview(
             )
         ).all()
     )
-    scenario = await _redis_text(redis, "ecoroute:demo:grid", "moderate")
-    reading = await FixtureCarbonProvider(scenario).reading("demo-local")
+    reading: CarbonReading | None
+    if settings.demo_mode:
+        scenario = await _redis_text(redis, "ecoroute:demo:grid", "moderate")
+        reading = await FixtureCarbonProvider(scenario).reading("demo-local")
+    else:
+        latest_reading = await session.scalar(
+            select(CarbonReadingRecord).order_by(CarbonReadingRecord.observed_at.desc()).limit(1)
+        )
+        reading = (
+            CarbonReading(
+                zone=latest_reading.zone,
+                intensity_gco2_kwh=latest_reading.intensity_gco2_kwh,
+                observed_at=latest_reading.observed_at,
+                fetched_at=latest_reading.fetched_at,
+                source=latest_reading.source,
+                evidence=(
+                    "stale"
+                    if utcnow() - latest_reading.observed_at
+                    > timedelta(minutes=settings.carbon_freshness_target_minutes)
+                    else latest_reading.evidence
+                ),
+                metadata=latest_reading.reading_metadata,
+            )
+            if latest_reading
+            else None
+        )
     agents = int(
         await session.scalar(
             select(func.count()).select_from(NodeAgent).where(NodeAgent.status == "online")
@@ -458,7 +509,10 @@ async def overview(
                     ImpactRecord.actual_carbon_g,
                 )
                 .join(ImpactRecord, ImpactRecord.request_id == GatewayRequest.id)
-                .where(GatewayRequest.started_at >= since)
+                .where(
+                    GatewayRequest.started_at >= since,
+                    ImpactRecord.carbon_accounting_available.is_(True),
+                )
                 .order_by(GatewayRequest.started_at)
                 .limit(500)
             )
@@ -518,7 +572,15 @@ async def overview(
                 "severity": "warning",
             }
         )
-    if reading.evidence in {"stale", "simulated"}:
+    if reading is None:
+        warnings.append(
+            {
+                "code": "carbon_unavailable",
+                "message": "No live grid reading is available",
+                "severity": "warning",
+            }
+        )
+    elif reading.evidence in {"stale", "simulated"}:
         warnings.append(
             {
                 "code": "carbon_evidence",
@@ -533,11 +595,22 @@ async def overview(
         "requests": total,
         "successRate": successes / total if total else 1.0,
         "cacheHitRate": cache_hits / total if total else 0.0,
-        "actualCarbonGrams": float(impact[0]),
-        "avoidedCarbonGrams": max(0, float(impact[1])),
+        "actualCarbonGrams": float(impact[0]) if int(impact[4]) else None,
+        "avoidedCarbonGrams": max(0, float(impact[1])) if int(impact[4]) else None,
+        "carbonAccountedRequests": int(impact[4]),
         "actualCostUsd": float(impact[2]),
         "costDeltaUsd": float(impact[2] - impact[3]),
-        "grid": reading.model_dump(mode="json"),
+        "grid": reading.model_dump(mode="json")
+        if reading
+        else {
+            "zone": "unknown",
+            "intensity_gco2_kwh": None,
+            "observed_at": None,
+            "fetched_at": None,
+            "source": "ecoroute-default-no-reading",
+            "evidence": "stale",
+            "metadata": {"available": False},
+        },
         "routeDistribution": [{"route": route, "count": count} for route, count in routes],
         "connectedNodes": agents,
         "activeProfiles": list(
@@ -561,7 +634,7 @@ async def overview(
         ],
         "qualityFallbackCount": quality_fallback_count,
         "warnings": warnings,
-        "evidence": "simulated",
+        "evidence": reading.evidence if reading else "stale",
         "recentRequests": [
             {
                 "id": str(item.id),
@@ -714,6 +787,11 @@ async def patch_endpoint(
         "physicalModel": endpoint.physical_model,
         "region": endpoint.region,
         "gridZone": endpoint.grid_zone,
+        "gridLookupMode": endpoint.grid_lookup_mode,
+        "gridDataCenterProvider": endpoint.grid_data_center_provider,
+        "gridDataCenterRegion": endpoint.grid_data_center_region,
+        "processingLocationEvidence": endpoint.processing_location_evidence,
+        "gridAttribution": endpoint.grid_attribution,
         "qualityTier": endpoint.quality_tier,
         "capabilities": endpoint.capabilities,
         "contextWindowTokens": endpoint.context_window_tokens,
@@ -791,17 +869,41 @@ async def delete_endpoint(
 
 @router.post("/model-endpoints/{endpoint_id}/test")
 async def test_endpoint(
-    endpoint_id: uuid.UUID, session: AsyncSession = Depends(get_session)
+    endpoint_id: uuid.UUID,
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
 ) -> dict[str, Any]:
     endpoint = await session.get(ModelEndpoint, endpoint_id)
     if endpoint is None:
         raise EcoRouteError("Endpoint not found", status_code=404, code="not_found")
     started = datetime.now(timezone.utc)
     result = await providers.for_provider(endpoint.provider).health(endpoint)
+    scenario = await _redis_text(redis, "ecoroute:demo:grid", "moderate")
+    reading = await CarbonService(settings, redis).reading(
+        session,
+        endpoint.grid_zone,
+        demo_scenario=scenario if settings.demo_mode else None,
+        allow_stale_minutes=60,
+        **_carbon_lookup(endpoint),
+    )
+    carbon_available = _carbon_accounting_available(endpoint, reading)
+    grid = reading.model_dump(mode="json")
+    if not carbon_available:
+        grid.update(
+            {
+                "intensity_gco2_kwh": None,
+                "observed_at": None,
+                "fetched_at": None,
+            }
+        )
     return {
         **result,
         "latencyMs": int((datetime.now(timezone.utc) - started).total_seconds() * 1000),
         "capabilities": endpoint.capabilities,
+        "grid": grid,
+        "carbonAccountingAvailable": carbon_available,
+        "gridAttribution": endpoint.grid_attribution,
+        "processingLocationEvidence": endpoint.processing_location_evidence,
     }
 
 
@@ -1137,7 +1239,7 @@ async def simulate_policy(
         ).all()
     )
     scenario = await _redis_text(redis, "ecoroute:demo:grid", "moderate")
-    provider = FixtureCarbonProvider(scenario)
+    carbon_service = CarbonService(settings, redis)
     profile_ids = {endpoint.slm_profile_id for endpoint in endpoint_rows if endpoint.slm_profile_id}
     profiles = {
         profile.id: profile
@@ -1147,11 +1249,19 @@ async def simulate_policy(
     }
     candidates = []
     for endpoint in endpoint_rows:
-        reading = await provider.reading(endpoint.grid_zone)
+        reading = await carbon_service.reading(
+            session,
+            endpoint.grid_zone,
+            demo_scenario=scenario if settings.demo_mode else None,
+            allow_stale_minutes=RoutingPolicyConfig.model_validate(
+                policy_row.config
+            ).allow_stale_carbon_minutes,
+            **_carbon_lookup(endpoint),
+        )
         candidates.append(
             _candidate(
                 endpoint,
-                reading.intensity_gco2_kwh,
+                reading,
                 profiles.get(endpoint.slm_profile_id) if endpoint.slm_profile_id else None,
             )
         )
@@ -1165,7 +1275,7 @@ async def simulate_policy(
         logical.required_fallback_endpoint_id,  # type: ignore[arg-type]
     )
     return {
-        "evidence": "simulated",
+        "evidence": "simulated" if settings.demo_mode else "live",
         "classification": classification.model_dump(mode="json"),
         "candidates": [item.model_dump(mode="json") for item in snapshots],
         "selectedEndpointId": str(selected.id),
@@ -1265,7 +1375,12 @@ async def requests(
                 "fallbackUsed": item.fallback_used,
                 "durationMs": item.duration_ms,
                 "costUsd": float(impact.actual_cost_usd) if impact else 0.0,
-                "carbonGrams": impact.actual_carbon_g if impact else 0.0,
+                "carbonGrams": (
+                    impact.actual_carbon_g
+                    if impact and impact.carbon_accounting_available
+                    else None
+                ),
+                "carbonAccountingAvailable": bool(impact and impact.carbon_accounting_available),
                 "evidence": (
                     impact.evidence.get("carbon_level", "estimated") if impact else "estimated"
                 ),
@@ -1367,11 +1482,18 @@ async def request_detail(
                 "strategy": value.strategy,
                 "baselineEnergyKwh": value.baseline_energy_kwh,
                 "actualEnergyKwh": value.actual_energy_kwh,
-                "baselineCarbonG": value.baseline_carbon_g,
-                "actualCarbonG": value.actual_carbon_g,
-                "rawCarbonDeltaG": value.raw_carbon_delta_g,
+                "baselineCarbonG": (
+                    value.baseline_carbon_g if value.carbon_accounting_available else None
+                ),
+                "actualCarbonG": (
+                    value.actual_carbon_g if value.carbon_accounting_available else None
+                ),
+                "rawCarbonDeltaG": (
+                    value.raw_carbon_delta_g if value.carbon_accounting_available else None
+                ),
                 "baselineCostUsd": str(value.baseline_cost_usd),
                 "actualCostUsd": str(value.actual_cost_usd),
+                "carbonAccountingAvailable": value.carbon_accounting_available,
                 "evidence": value.evidence,
             }
             for value in impacts
@@ -1449,6 +1571,7 @@ async def cache_stats(session: AsyncSession = Depends(get_session)) -> dict[str,
             select(func.coalesce(func.sum(ImpactRecord.raw_carbon_delta_g), 0)).where(
                 ImpactRecord.strategy == "end_to_end",
                 ImpactRecord.actual_energy_kwh <= 0.000001,
+                ImpactRecord.carbon_accounting_available.is_(True),
             )
         )
         or 0
@@ -1456,9 +1579,28 @@ async def cache_stats(session: AsyncSession = Depends(get_session)) -> dict[str,
     reading = await session.scalar(
         select(CarbonReadingRecord).order_by(CarbonReadingRecord.observed_at.desc()).limit(1)
     )
-    intensity = reading.intensity_gco2_kwh if reading else 275.0
-    grid_state = "clean" if intensity <= 150 else "dirty" if intensity >= 400 else "moderate"
-    capacity = {"clean": 50, "moderate": 75, "dirty": 100}[grid_state]
+    reading_is_fresh = bool(
+        reading
+        and utcnow() - reading.observed_at
+        <= timedelta(minutes=settings.carbon_freshness_target_minutes)
+    )
+    intensity = (
+        reading.intensity_gco2_kwh
+        if reading_is_fresh and reading is not None
+        else 275.0
+        if settings.demo_mode
+        else None
+    )
+    grid_state = (
+        "unknown"
+        if intensity is None
+        else "clean"
+        if intensity <= 150
+        else "dirty"
+        if intensity >= 400
+        else "moderate"
+    )
+    capacity = {"clean": 50, "moderate": 75, "dirty": 100, "unknown": 75}[grid_state]
     total_hits = exact_hits + semantic_hits
     return {
         "entries": int(entries),
@@ -1472,7 +1614,13 @@ async def cache_stats(session: AsyncSession = Depends(get_session)) -> dict[str,
         "gridState": grid_state,
         "gridIntensityGco2Kwh": intensity,
         "capacityTargetPct": capacity,
-        "evidence": reading.evidence if reading else "simulated",
+        "evidence": (
+            reading.evidence
+            if reading_is_fresh and reading is not None
+            else "simulated"
+            if settings.demo_mode
+            else "stale"
+        ),
         "gridPolicy": "carbon-aware dynamic TTL; similarity threshold unchanged",
     }
 
@@ -2886,6 +3034,13 @@ async def import_training_run(
                 "physicalModel": deployed_model_id,
                 "region": endpoint_options.get("region", "unknown"),
                 "gridZone": endpoint_options.get("gridZone", "unknown"),
+                "gridLookupMode": endpoint_options.get("gridLookupMode", "zone"),
+                "gridDataCenterProvider": endpoint_options.get("gridDataCenterProvider"),
+                "gridDataCenterRegion": endpoint_options.get("gridDataCenterRegion"),
+                "processingLocationEvidence": endpoint_options.get(
+                    "processingLocationEvidence", "unknown"
+                ),
+                "gridAttribution": endpoint_options.get("gridAttribution", "unknown"),
                 "qualityTier": "specialized" if dataset.slm_profile_id else "small",
                 "capabilities": endpoint_options.get(
                     "capabilities", ["text", "json_schema", "streaming"]
@@ -2949,21 +3104,27 @@ async def carbon_zones(
     redis: Redis = Depends(get_redis),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
-    scenario = await _redis_text(redis, "ecoroute:demo:grid", "moderate")
-    provider = FixtureCarbonProvider(scenario)
-    fixture = [await provider.reading("demo-local"), await provider.reading("demo-remote")]
+    fixture = []
+    if settings.demo_mode:
+        scenario = await _redis_text(redis, "ecoroute:demo:grid", "moderate")
+        provider = FixtureCarbonProvider(scenario)
+        fixture = [await provider.reading("demo-local"), await provider.reading("demo-remote")]
     latest_rows = list(
         (
             await session.scalars(
                 select(CarbonReadingRecord)
-                .distinct(CarbonReadingRecord.zone)
-                .order_by(CarbonReadingRecord.zone, CarbonReadingRecord.fetched_at.desc())
+                .distinct(CarbonReadingRecord.zone, CarbonReadingRecord.lookup_key)
+                .order_by(
+                    CarbonReadingRecord.zone,
+                    CarbonReadingRecord.lookup_key,
+                    CarbonReadingRecord.fetched_at.desc(),
+                )
             )
         ).all()
     )
-    by_zone: dict[str, CarbonReadingRecord] = {}
+    by_location: dict[str, CarbonReadingRecord] = {}
     for row in latest_rows:
-        by_zone.setdefault(row.zone, row)
+        by_location.setdefault(f"{row.zone}|{row.lookup_key}", row)
     items = [
         {
             "zone": row.zone,
@@ -2971,28 +3132,45 @@ async def carbon_zones(
             "observedAt": row.observed_at.isoformat(),
             "fetchedAt": row.fetched_at.isoformat(),
             "source": row.source,
-            "evidence": row.evidence,
-            "freshnessSeconds": max(0, int((utcnow() - row.fetched_at).total_seconds())),
+            "evidence": (
+                "stale"
+                if utcnow() - row.observed_at
+                > timedelta(minutes=settings.carbon_freshness_target_minutes)
+                else row.evidence
+            ),
+            "lookupKey": row.lookup_key,
+            "metadata": row.reading_metadata,
+            "freshnessSeconds": max(0, int((utcnow() - row.observed_at).total_seconds())),
         }
-        for row in by_zone.values()
+        for row in by_location.values()
     ]
-    known = {item["zone"] for item in items}
+    known = {f"{item['zone']}|{item['lookupKey']}" for item in items}
     items.extend(
         {
             **reading.model_dump(mode="json", by_alias=True),
+            "lookupKey": "zone",
             "freshnessSeconds": max(0, int((utcnow() - reading.fetched_at).total_seconds())),
         }
         for reading in fixture
-        if reading.zone not in known
+        if f"{reading.zone}|zone" not in known
     )
-    items.sort(key=lambda item: str(item["zone"]))
+    items.sort(key=lambda item: f"{item['zone']}|{item['lookupKey']}")
     if cursor is not None:
-        items = [item for item in items if str(item["zone"]) > cursor]
+        items = [item for item in items if f"{item['zone']}|{item['lookupKey']}" > cursor]
     has_more = len(items) > limit
     items = items[:limit]
     return {
+        "provider": configured_carbon_provider_name(settings),
+        "live": not settings.demo_mode,
+        "configured": bool(
+            settings.demo_mode
+            or settings.electricity_maps_api_key
+            or (settings.carbon_provider == "carbon_aware" and settings.carbon_aware_base_url)
+        ),
         "items": items,
-        "nextCursor": str(items[-1]["zone"]) if has_more and items else None,
+        "nextCursor": (
+            f"{items[-1]['zone']}|{items[-1]['lookupKey']}" if has_more and items else None
+        ),
     }
 
 
@@ -3004,11 +3182,11 @@ async def refresh_carbon(
     redis: Redis = Depends(get_redis),
 ) -> dict[str, Any]:
     workspace = await _workspace(session)
-    zones = body.get("zones", ["demo-local", "demo-remote"])
-    if not isinstance(zones, list) or not zones or len(zones) > 50:
-        raise EcoRouteError(
-            "zones must be a non-empty list of at most 50 zones", code="invalid_zones"
-        )
+    zones = body.get("zones")
+    if zones is None:
+        zones = []
+    if not isinstance(zones, list) or len(zones) > 50:
+        raise EcoRouteError("zones must be a list of at most 50 zones", code="invalid_zones")
     job = await _enqueue_job(
         session,
         redis,
@@ -3552,12 +3730,13 @@ async def report_summary(
         evidence=evidence,
     )
     impacts = [impact for _, _, impact in rows if impact is not None]
+    carbon_impacts = [impact for impact in impacts if impact.carbon_accounting_available]
     evidence_counts = {"measured": 0, "estimated": 0, "stale": 0, "simulated": 0}
-    for impact in impacts:
+    for impact in carbon_impacts:
         level = str(impact.evidence.get("carbon_level", "estimated"))
         evidence_counts[level] = evidence_counts.get(level, 0) + 1
-    baseline_carbon = sum(item.baseline_carbon_g for item in impacts)
-    actual_carbon = sum(item.actual_carbon_g for item in impacts)
+    baseline_carbon = sum(item.baseline_carbon_g for item in carbon_impacts)
+    actual_carbon = sum(item.actual_carbon_g for item in carbon_impacts)
     baseline_energy = sum(item.baseline_energy_kwh for item in impacts)
     actual_energy = sum(item.actual_energy_kwh for item in impacts)
     baseline_cost = sum(float(item.baseline_cost_usd) for item in impacts)
@@ -3572,11 +3751,23 @@ async def report_summary(
         "successfulRequests": sum(item.status == "completed" for item, _, _ in rows),
         "qualityFallbacks": sum(item.fallback_used for item, _, _ in rows),
         "averageLatencyMs": sum(durations) / len(durations) if durations else 0,
-        "baselineCarbonGrams": baseline_carbon,
-        "actualCarbonGrams": actual_carbon,
-        "rawCarbonDeltaGrams": baseline_carbon - actual_carbon,
-        "avoidedCarbonGrams": sum(max(0, item.raw_carbon_delta_g) for item in impacts),
-        "carbonOutcome": "increase" if actual_carbon > baseline_carbon else "avoided",
+        "baselineCarbonGrams": baseline_carbon if carbon_impacts else None,
+        "actualCarbonGrams": actual_carbon if carbon_impacts else None,
+        "rawCarbonDeltaGrams": baseline_carbon - actual_carbon if carbon_impacts else None,
+        "avoidedCarbonGrams": (
+            sum(max(0, item.raw_carbon_delta_g) for item in carbon_impacts)
+            if carbon_impacts
+            else None
+        ),
+        "carbonOutcome": (
+            "unavailable"
+            if not carbon_impacts
+            else "increase"
+            if actual_carbon > baseline_carbon
+            else "avoided"
+        ),
+        "carbonAccountedRequests": len(carbon_impacts),
+        "carbonUnavailableRequests": len(impacts) - len(carbon_impacts),
         "baselineEnergyKwh": baseline_energy,
         "actualEnergyKwh": actual_energy,
         "baselineCostUsd": baseline_cost,
@@ -3584,7 +3775,7 @@ async def report_summary(
         "costDeltaUsd": actual_cost - baseline_cost,
         "evidenceCounts": evidence_counts,
         "operationalCarbonIntensityLabel": "Operational carbon intensity",
-        "methodologyVersion": "ecoroute-v1",
+        "methodologyVersion": "ecoroute-v2",
         "boundary": "Operational inference energy and carbon; embodied carbon excluded.",
     }
 
@@ -3629,6 +3820,7 @@ async def request_csv(
             "baseline_carbon_g",
             "actual_carbon_g",
             "raw_carbon_delta_g",
+            "carbon_accounting_available",
             "evidence",
             "carbon_source",
             "redacted_prompt_preview",
@@ -3657,9 +3849,10 @@ async def request_csv(
                 impact.actual_cost_usd if impact else "",
                 impact.baseline_energy_kwh if impact else "",
                 impact.actual_energy_kwh if impact else "",
-                impact.baseline_carbon_g if impact else "",
-                impact.actual_carbon_g if impact else "",
-                impact.raw_carbon_delta_g if impact else "",
+                impact.baseline_carbon_g if impact and impact.carbon_accounting_available else "",
+                impact.actual_carbon_g if impact and impact.carbon_accounting_available else "",
+                impact.raw_carbon_delta_g if impact and impact.carbon_accounting_available else "",
+                impact.carbon_accounting_available if impact else "",
                 impact.evidence.get("carbon_level", "") if impact else "",
                 impact.evidence.get("carbon_source", "") if impact else "",
                 item.redacted_prompt_preview or "",
@@ -3671,7 +3864,7 @@ async def request_csv(
     )
     evidence_counts = {"measured": 0, "estimated": 0, "stale": 0, "simulated": 0}
     for _, _, impact in rows:
-        if impact is not None:
+        if impact is not None and impact.carbon_accounting_available:
             level = str(impact.evidence.get("carbon_level", "estimated"))
             evidence_counts[level] = evidence_counts.get(level, 0) + 1
     return PlainTextResponse(
@@ -3680,7 +3873,7 @@ async def request_csv(
         headers={
             "Content-Disposition": 'attachment; filename="ecoroute-requests.csv"',
             "X-EcoRoute-Generated-At": generated,
-            "X-EcoRoute-Methodology-Version": "ecoroute-v1",
+            "X-EcoRoute-Methodology-Version": "ecoroute-v2",
             "X-EcoRoute-Filters": json.dumps(filters, separators=(",", ":")),
             "X-EcoRoute-Evidence-Counts": json.dumps(evidence_counts, separators=(",", ":")),
         },
@@ -3725,7 +3918,7 @@ async def impact_framework(
     grouped: dict[tuple[str, datetime, str, str, str], dict[str, Any]] = {}
     evidence_counts = {"measured": 0, "estimated": 0, "stale": 0, "simulated": 0}
     for request, endpoint, record in rows:
-        if record is None:
+        if record is None or not record.carbon_accounting_available:
             continue
         hour = request.started_at.replace(minute=0, second=0, microsecond=0)
         endpoint_name = (
@@ -3770,7 +3963,7 @@ async def impact_framework(
             slug,
             {
                 "pipeline": [],
-                "defaults": {"methodology-version": "ecoroute-v1", "endpoint": endpoint_name},
+                "defaults": {"methodology-version": "ecoroute-v2", "endpoint": endpoint_name},
                 "inputs": [],
             },
         )
@@ -3782,7 +3975,7 @@ async def impact_framework(
     manifest = {
         "name": "EcoRoute operational impact export",
         "description": "Precomputed operational observations; simulated values remain explicitly labeled.",
-        "tags": {"kind": "web", "methodology-version": "ecoroute-v1"},
+        "tags": {"kind": "web", "methodology-version": "ecoroute-v2"},
         "metadata": {
             "generated-at": generated,
             "filters": filters,
@@ -3799,7 +3992,7 @@ async def impact_framework(
         headers={
             "Content-Disposition": 'attachment; filename="ecoroute-impact.yml"',
             "X-EcoRoute-Generated-At": generated,
-            "X-EcoRoute-Methodology-Version": "ecoroute-v1",
+            "X-EcoRoute-Methodology-Version": "ecoroute-v2",
         },
     )
 
@@ -4140,9 +4333,7 @@ async def agent_event(
                 (optimized.get("process_cpu_seconds") or {}).get("inference"),
             ),
             "optimizedBackgroundThrottledUsec": (
-                ((optimized.get("cgroup_cpu") or {}).get("background") or {}).get(
-                    "throttled_usec"
-                )
+                ((optimized.get("cgroup_cpu") or {}).get("background") or {}).get("throttled_usec")
             ),
         }
         benchmark_completed.status = "completed"

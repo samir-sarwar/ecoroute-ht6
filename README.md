@@ -8,6 +8,11 @@ operational-impact accounting, and transactional self-hosted node controls.
 
 The credential-free stack is fully runnable. It uses deterministic fake model endpoints, fixture
 carbon readings, and a labeled node simulator. It never trains or spends money automatically.
+
+Production mode supports live Electricity Maps v4 carbon intensity, explicit Carbon Aware
+integration, and evidence-aware regional routing. See
+[`docs/live-regional-routing.md`](docs/live-regional-routing.md) for configuration and claim
+boundaries.
 Gemini and FreeSOLO are configured but remain inactive until an operator supplies credentials and
 explicitly starts the gated workflow.
 

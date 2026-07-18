@@ -17,6 +17,7 @@ class ImpactCalculation:
     baseline_cost_usd: Decimal
     actual_cost_usd: Decimal
     cost_delta_usd: Decimal
+    carbon_accounting_available: bool
 
 
 def calculate_impact(
@@ -26,6 +27,8 @@ def calculate_impact(
     output_tokens: int,
     *,
     router_energy_kwh: float = 0,
+    baseline_carbon_available: bool = True,
+    selected_carbon_available: bool = True,
 ) -> ImpactCalculation:
     baseline_energy = estimate_energy(baseline, input_tokens, output_tokens)
     actual_energy = estimate_energy(selected, input_tokens, output_tokens) + router_energy_kwh
@@ -34,6 +37,7 @@ def calculate_impact(
     raw_delta = baseline_carbon - actual_carbon
     baseline_cost = estimate_cost(baseline, input_tokens, output_tokens)
     actual_cost = estimate_cost(selected, input_tokens, output_tokens)
+    carbon_accounting_available = baseline_carbon_available and selected_carbon_available
     return ImpactCalculation(
         baseline_energy_kwh=baseline_energy,
         actual_energy_kwh=actual_energy,
@@ -44,6 +48,7 @@ def calculate_impact(
         baseline_cost_usd=baseline_cost,
         actual_cost_usd=actual_cost,
         cost_delta_usd=actual_cost - baseline_cost,
+        carbon_accounting_available=carbon_accounting_available,
     )
 
 

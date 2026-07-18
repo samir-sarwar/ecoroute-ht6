@@ -12,6 +12,17 @@ from urllib.parse import urlparse
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 EvidenceLevel = Literal["measured", "estimated", "stale", "simulated"]
+ProcessingLocationEvidence = Literal[
+    "provider_contract", "operator_declared", "self_hosted", "unknown", "simulated"
+]
+GridAttribution = Literal[
+    "electricity_maps_data_center",
+    "physical_grid",
+    "regional_proxy",
+    "operator_declared",
+    "unknown",
+    "simulated",
+]
 TaskType = Literal[
     "policy_qa",
     "order_support",
@@ -214,6 +225,11 @@ class ModelEndpointCreate(ApiModel):
     physical_model: str = Field(min_length=1, max_length=300)
     region: str = Field(min_length=1, max_length=100)
     grid_zone: str = Field(min_length=1, max_length=100)
+    grid_lookup_mode: Literal["zone", "data_center"] = "zone"
+    grid_data_center_provider: str | None = Field(None, min_length=1, max_length=100)
+    grid_data_center_region: str | None = Field(None, min_length=1, max_length=100)
+    processing_location_evidence: ProcessingLocationEvidence = "unknown"
+    grid_attribution: GridAttribution = "unknown"
     quality_tier: Literal["specialized", "small", "standard", "frontier"]
     capabilities: set[Literal["text", "json_schema", "tools", "vision", "streaming"]] = Field(
         min_length=1
@@ -244,6 +260,56 @@ class ModelEndpointCreate(ApiModel):
             raise ValueError("credentialRef must be an env: reference using an uppercase name")
         if not self.region or not self.grid_zone:
             raise ValueError("region and gridZone are required")
+        if self.grid_lookup_mode == "data_center":
+            if not self.grid_data_center_provider or not self.grid_data_center_region:
+                raise ValueError(
+                    "data-center grid lookup requires gridDataCenterProvider and "
+                    "gridDataCenterRegion"
+                )
+            if self.grid_attribution != "electricity_maps_data_center":
+                raise ValueError(
+                    "data-center grid lookup requires gridAttribution=electricity_maps_data_center"
+                )
+        elif self.grid_data_center_provider or self.grid_data_center_region:
+            raise ValueError("data-center fields require gridLookupMode=data_center")
+        if self.grid_attribution == "electricity_maps_data_center" and (
+            self.grid_lookup_mode != "data_center"
+        ):
+            raise ValueError(
+                "gridAttribution=electricity_maps_data_center requires data-center lookup"
+            )
+        if self.grid_attribution == "regional_proxy" and self.processing_location_evidence in {
+            "unknown",
+            "simulated",
+        }:
+            raise ValueError(
+                "regional proxy attribution requires documented or operator-declared processing"
+            )
+        if self.processing_location_evidence == "self_hosted" and not self.self_hosted:
+            raise ValueError("self-hosted location evidence requires selfHosted=true")
+        if self.grid_attribution == "physical_grid" and (
+            not self.self_hosted or self.processing_location_evidence != "self_hosted"
+        ):
+            raise ValueError(
+                "physical-grid attribution requires a self-hosted endpoint with "
+                "self-hosted location evidence"
+            )
+        if not self.self_hosted and self.energy_evidence == "measured":
+            raise ValueError("hosted endpoint energy cannot be labeled measured")
+        if self.provider == "openai" and self.processing_location_evidence == "provider_contract":
+            hostname = (urlparse(self.base_url).hostname or "").casefold()
+            region = self.region.casefold().replace("_", "-")
+            expected_host = {
+                "us": "us.api.openai.com",
+                "usa": "us.api.openai.com",
+                "eu": "eu.api.openai.com",
+                "europe": "eu.api.openai.com",
+            }.get(region)
+            if expected_host is None or hostname != expected_host:
+                raise ValueError(
+                    "OpenAI provider-contract location evidence requires a matching "
+                    "US or EU regional API hostname"
+                )
         if self.concurrency_target > self.baseline_concurrency:
             raise ValueError("concurrencyTarget cannot exceed baselineConcurrency")
         if self.node_agent_id is not None and not self.self_hosted:
@@ -299,6 +365,7 @@ class CarbonReading(BaseModel):
     fetched_at: datetime
     source: str
     evidence: EvidenceLevel
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class CandidateSnapshot(BaseModel):
@@ -308,10 +375,15 @@ class CandidateSnapshot(BaseModel):
     quality_tier: str
     estimated_energy_kwh: float
     estimated_cost_usd: Decimal
-    estimated_carbon_g: float
+    estimated_carbon_g: float | None
     latency_p95_ms: int
     evidence: EvidenceLevel
     region: str | None = None
+    grid_zone: str | None = None
+    carbon_evidence: EvidenceLevel | None = None
+    processing_location_evidence: ProcessingLocationEvidence = "unknown"
+    grid_attribution: GridAttribution = "unknown"
+    carbon_source: str | None = None
     score: float | None = None
     excluded_reason: str | None = None
 

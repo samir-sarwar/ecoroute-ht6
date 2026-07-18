@@ -166,6 +166,9 @@ async def seed() -> None:
                     physical_model=spec["name"],
                     region=spec["region"],
                     grid_zone=spec["grid_zone"],
+                    grid_lookup_mode="zone",
+                    processing_location_evidence="simulated",
+                    grid_attribution="simulated",
                     quality_tier=spec["quality_tier"],
                     capabilities=["text", "json_schema", "streaming"]
                     + (["tools"] if spec["quality_tier"] == "frontier" else []),

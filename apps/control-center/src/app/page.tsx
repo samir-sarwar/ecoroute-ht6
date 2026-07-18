@@ -102,6 +102,10 @@ export default function Overview() {
       </div>
     );
   const data = query.data;
+  const gridIntensity = data.grid.intensity_gco2_kwh;
+  const gridIntensityLabel =
+    gridIntensity == null ? "—" : fmt.format(gridIntensity);
+  const demoGrid = data.grid.source.startsWith("ecoroute-fixture:");
   return (
     <div className="page">
       <header className="page-header">
@@ -113,7 +117,7 @@ export default function Overview() {
           </p>
         </div>
         <div className="header-status">
-          <span className="evidence simulated">Simulated</span>
+          <span className={`evidence ${data.evidence}`}>{data.evidence}</span>
           <span>Updated {formatUtcTime(data.generatedAt)}</span>
           <button
             className="icon-button"
@@ -125,38 +129,45 @@ export default function Overview() {
         </div>
       </header>
 
-      <section className="demo-toolbar" aria-label="Demo controls">
-        <div>
-          <span className="toolbar-label">Demo grid</span>
-          {["clean", "moderate", "dirty"].map((scenario) => (
-            <button
-              key={scenario}
-              className={
-                data.grid.source.endsWith(scenario)
-                  ? "segment active"
-                  : "segment"
-              }
-              onClick={() => grid.mutate(scenario)}
-            >
-              {scenario}
-            </button>
-          ))}
-        </div>
+      <section className="demo-toolbar" aria-label={demoGrid ? "Demo controls" : "Grid status"}>
+        {demoGrid ? (
+          <div>
+            <span className="toolbar-label">Demo grid</span>
+            {["clean", "moderate", "dirty"].map((scenario) => (
+              <button
+                key={scenario}
+                className={
+                  data.grid.source.endsWith(scenario)
+                    ? "segment active"
+                    : "segment"
+                }
+                onClick={() => grid.mutate(scenario)}
+              >
+                {scenario}
+              </button>
+            ))}
+          </div>
+        ) : (
+          <div>
+            <span className="toolbar-label">Live grid provider</span>
+            <strong>{data.grid.source}</strong>
+          </div>
+        )}
         <div className="grid-reading">
           <Zap size={16} />
-          <strong>
-            {fmt.format(data.grid.intensity_gco2_kwh)}
-          </strong> gCO₂e/kWh <span>Policy threshold</span>
+          <strong>{gridIntensityLabel}</strong> gCO₂e/kWh <span>{data.grid.zone}</span>
         </div>
-        <button
-          className="secondary-button"
-          onClick={() => failure.mutate()}
-          disabled={failure.isPending}
-        >
-          {failure.isSuccess
-            ? "Next SLM check will fail"
-            : "Force next quality failure"}
-        </button>
+        {demoGrid ? (
+          <button
+            className="secondary-button"
+            onClick={() => failure.mutate()}
+            disabled={failure.isPending}
+          >
+            {failure.isSuccess
+              ? "Next SLM check will fail"
+              : "Force next quality failure"}
+          </button>
+        ) : null}
       </section>
 
       <div className="metric-grid">
@@ -168,8 +179,16 @@ export default function Overview() {
         />
         <Metric
           label="Operational carbon"
-          value={`${fmt.format(data.actualCarbonGrams)} g`}
-          detail={`${fmt.format(data.avoidedCarbonGrams)} g avoided`}
+          value={
+            data.actualCarbonGrams == null
+              ? "Unavailable"
+              : `${fmt.format(data.actualCarbonGrams)} g`
+          }
+          detail={
+            data.avoidedCarbonGrams == null
+              ? "No verified grid/location attribution"
+              : `${fmt.format(data.avoidedCarbonGrams)} g avoided`
+          }
           trend="down"
         />
         <Metric
@@ -184,7 +203,7 @@ export default function Overview() {
         />
         <Metric
           label="Grid intensity"
-          value={`${fmt.format(data.grid.intensity_gco2_kwh)}`}
+          value={gridIntensityLabel}
           detail={`${data.grid.zone} · ${data.grid.evidence}`}
         />
         <Metric

@@ -1206,6 +1206,28 @@ export interface components {
             /** Gridzone */
             gridZone: string;
             /**
+             * Gridlookupmode
+             * @default zone
+             * @enum {string}
+             */
+            gridLookupMode: "zone" | "data_center";
+            /** Griddatacenterprovider */
+            gridDataCenterProvider?: string | null;
+            /** Griddatacenterregion */
+            gridDataCenterRegion?: string | null;
+            /**
+             * Processinglocationevidence
+             * @default unknown
+             * @enum {string}
+             */
+            processingLocationEvidence: "provider_contract" | "operator_declared" | "self_hosted" | "unknown" | "simulated";
+            /**
+             * Gridattribution
+             * @default unknown
+             * @enum {string}
+             */
+            gridAttribution: "electricity_maps_data_center" | "physical_grid" | "regional_proxy" | "operator_declared" | "unknown" | "simulated";
+            /**
              * Qualitytier
              * @enum {string}
              */
@@ -1235,6 +1257,8 @@ export interface components {
             latencyP95Ms: number;
             /** Selfhosted */
             selfHosted: boolean;
+            /** Nodeagentid */
+            nodeAgentId?: string | null;
             /** Slmprofileid */
             slmProfileId?: string | null;
             /**

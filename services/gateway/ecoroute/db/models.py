@@ -68,6 +68,11 @@ class ModelEndpoint(Base, TimestampMixin):
     physical_model: Mapped[str] = mapped_column(String(300))
     region: Mapped[str] = mapped_column(String(100))
     grid_zone: Mapped[str] = mapped_column(String(100), index=True)
+    grid_lookup_mode: Mapped[str] = mapped_column(String(20), default="zone")
+    grid_data_center_provider: Mapped[str | None] = mapped_column(String(100))
+    grid_data_center_region: Mapped[str | None] = mapped_column(String(100))
+    processing_location_evidence: Mapped[str] = mapped_column(String(30), default="unknown")
+    grid_attribution: Mapped[str] = mapped_column(String(40), default="unknown")
     quality_tier: Mapped[str] = mapped_column(String(40))
     capabilities: Mapped[list[str]] = mapped_column(ARRAY(String), default=list)
     context_window_tokens: Mapped[int] = mapped_column(Integer)
@@ -290,6 +295,7 @@ class ImpactRecord(Base):
     raw_carbon_delta_g: Mapped[float] = mapped_column(Float)
     baseline_cost_usd: Mapped[Decimal] = mapped_column(Numeric(18, 9))
     actual_cost_usd: Mapped[Decimal] = mapped_column(Numeric(18, 9))
+    carbon_accounting_available: Mapped[bool] = mapped_column(Boolean, default=True)
     evidence: Mapped[dict[str, Any]] = mapped_column(JSONB)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     __table_args__ = (UniqueConstraint("request_id", "strategy"),)
@@ -330,7 +336,13 @@ class CarbonReadingRecord(Base):
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     source: Mapped[str] = mapped_column(String(200))
     evidence: Mapped[str] = mapped_column(String(20))
-    __table_args__ = (UniqueConstraint("zone", "observed_at", "source"),)
+    lookup_key: Mapped[str] = mapped_column(String(240), default="zone")
+    reading_metadata: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    __table_args__ = (
+        UniqueConstraint(
+            "zone", "observed_at", "source", "lookup_key", name="uq_carbon_readings_lookup"
+        ),
+    )
 
 
 class NodeAgent(Base, TimestampMixin):

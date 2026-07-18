@@ -2,11 +2,12 @@ export type EvidenceLevel = "measured" | "estimated" | "stale" | "simulated";
 
 export interface GridReading {
   zone: string;
-  intensity_gco2_kwh: number;
-  observed_at: string;
-  fetched_at: string;
+  intensity_gco2_kwh: number | null;
+  observed_at: string | null;
+  fetched_at: string | null;
   source: string;
   evidence: EvidenceLevel;
+  metadata?: Record<string, unknown>;
 }
 
 export interface OverviewResponse {
@@ -15,8 +16,9 @@ export interface OverviewResponse {
   requests: number;
   successRate: number;
   cacheHitRate: number;
-  actualCarbonGrams: number;
-  avoidedCarbonGrams: number;
+  actualCarbonGrams: number | null;
+  avoidedCarbonGrams: number | null;
+  carbonAccountedRequests: number;
   actualCostUsd: number;
   costDeltaUsd: number;
   grid: GridReading;
@@ -38,4 +40,3 @@ export interface ListResponse<T> {
   items: T[];
   nextCursor?: string | null;
 }
-
