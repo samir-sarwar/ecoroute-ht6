@@ -3422,6 +3422,9 @@ function NodesView() {
           profile: "eco",
           promptIds: ["returns", "shipping", "exchange", "delay"],
           phaseSeconds: 30,
+          warmupSeconds: 5,
+          cooldownSeconds: 5,
+          concurrency: 2,
         }),
       }),
     onSuccess: () =>
@@ -3631,7 +3634,12 @@ function NodesView() {
                 <div className="inline-form">
                   <select id="benchmark-endpoint">
                     {endpoints.data?.items
-                      .filter((item) => item.selfHosted)
+                      .filter(
+                        (item) =>
+                          item.selfHosted &&
+                          (selected.evidence === "simulated" ||
+                            item.nodeAgentId === agentId),
+                      )
                       .map((item) => (
                         <option key={item.id} value={item.id}>
                           {item.name}
@@ -3665,9 +3673,31 @@ function NodesView() {
                           <dt>p95 latency</dt>
                           <dd>{item.comparison.p95LatencyChangePct}%</dd>
                           <dt>Energy/request</dt>
-                          <dd>{item.comparison.energyPerRequestChangePct}%</dd>
+                          <dd>
+                            {item.comparison.energyPerRequestChangePct == null
+                              ? "Unavailable"
+                              : `${item.comparison.energyPerRequestChangePct}%`}
+                          </dd>
                           <dt>Quality</dt>
                           <dd>{item.comparison.qualityChange}</dd>
+                          {item.comparison.backgroundCpuChangePct != null ? (
+                            <>
+                              <dt>Background CPU</dt>
+                              <dd>{item.comparison.backgroundCpuChangePct}%</dd>
+                            </>
+                          ) : null}
+                          {item.comparison.optimizedBackgroundThrottledUsec !=
+                          null ? (
+                            <>
+                              <dt>Kernel throttling</dt>
+                              <dd>
+                                {Math.round(
+                                  item.comparison
+                                    .optimizedBackgroundThrottledUsec / 1000,
+                                )} ms
+                              </dd>
+                            </>
+                          ) : null}
                         </dl>
                       ) : (
                         <p>Waiting for phases…</p>

@@ -9,18 +9,27 @@
 # training jsonl files ARE committed (small, reproducible training inputs).
 *.pkl
 data/routerbench/*.pkl
+training/**/configs/*.rendered.toml
+training/**/dataset/generated/
 
 # --- python ---
 __pycache__/
 *.pyc
+*.py[cod]
 .venv/
 venv/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+*.egg-info/
+coverage.xml
+.coverage
 
 # --- node ---
 node_modules/
+.next/
+playwright-report/
+test-results/
 dist/
 build/
 
@@ -28,3 +37,11 @@ build/
 .DS_Store
 Thumbs.db
 *.log
+
+# --- misc ---
+agent-state/
+
+# Local reference artifacts and history helper
+ECOROUTE_TECHNICAL_SPEC.md
+*.pdf
+seeddata.sh

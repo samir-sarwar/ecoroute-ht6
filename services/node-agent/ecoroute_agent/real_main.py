@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import platform
@@ -8,11 +9,13 @@ import signal
 import socket
 import uuid
 from collections import deque
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import httpx
+import psutil
 from ecoroute.db.base import uuid7
 
 from ecoroute_agent.collectors import SystemCollector, detect_capabilities
@@ -141,6 +144,38 @@ def _percentile(values: list[float], percentile: float) -> float:
     return ordered[index]
 
 
+def _process_cpu_seconds(pids: list[int]) -> float:
+    total = 0.0
+    for pid in pids:
+        try:
+            times = psutil.Process(pid).cpu_times()
+        except (psutil.Error, OSError):
+            continue
+        total += float(times.user) + float(times.system)
+    return total
+
+
+def _cgroup_cpu_stat(group: str) -> dict[str, int]:
+    root = Path(os.getenv("ECOROUTE_CGROUP_ROOT", "/sys/fs/cgroup/ecoroute.slice"))
+    path = root / group / "cpu.stat"
+    try:
+        values = {}
+        for line in path.read_text().splitlines():
+            key, raw_value = line.split(maxsplit=1)
+            values[key] = int(raw_value)
+        return values
+    except (OSError, ValueError):
+        return {}
+
+
+def _counter_delta(before: dict[str, int], after: dict[str, int]) -> dict[str, int]:
+    return {
+        key: max(0, value - before.get(key, 0))
+        for key, value in after.items()
+        if key in before
+    }
+
+
 async def _benchmark_phase(
     client: httpx.AsyncClient,
     base_url: str,
@@ -152,7 +187,18 @@ async def _benchmark_phase(
     collector: SystemCollector,
     prompt_ids: tuple[str, ...],
 ) -> dict[str, Any]:
-    before = _energy_counter_kwh(collector.sample())
+    before_sample = collector.sample()
+    before = _energy_counter_kwh(before_sample)
+    process_pids = {
+        "inference": _integer_list("ECOROUTE_INFERENCE_PIDS"),
+        "background": _integer_list("ECOROUTE_BACKGROUND_PIDS"),
+    }
+    before_process_cpu = {
+        name: _process_cpu_seconds(pids) for name, pids in process_pids.items()
+    }
+    before_cgroup_cpu = {
+        name: _cgroup_cpu_stat(name) for name in ("inference", "background")
+    }
     started = asyncio.get_running_loop().time()
     results: list[dict[str, Any]] = []
     batch_index = 0
@@ -172,8 +218,22 @@ async def _benchmark_phase(
             results.append(response.json())
         batch_index += concurrency
     elapsed = max(0.001, asyncio.get_running_loop().time() - started)
-    after = _energy_counter_kwh(collector.sample())
+    after_sample = collector.sample()
+    after = _energy_counter_kwh(after_sample)
     energy = max(0.0, after - before) if before is not None and after is not None else None
+    process_cpu = {
+        name: round(max(0.0, _process_cpu_seconds(pids) - before_process_cpu[name]), 6)
+        for name, pids in process_pids.items()
+    }
+    cgroup_cpu = {
+        name: _counter_delta(before_cgroup_cpu[name], _cgroup_cpu_stat(name))
+        for name in ("inference", "background")
+    }
+    energy_sources = []
+    if after_sample.get("rapl_energy_uj") is not None:
+        energy_sources.append("rapl")
+    if any(device.get("total_energy_mj") is not None for device in after_sample.get("gpu", [])):
+        energy_sources.append("nvml-total-energy")
     successful = [item for item in results if item.get("success")]
     latencies = [float(item.get("latencyMs", 0)) for item in successful]
     total_tokens = sum(
@@ -198,8 +258,45 @@ async def _benchmark_phase(
         "request_count": len(results),
         "successful_requests": len(successful),
         "error_rate": round(1 - len(successful) / len(results), 6) if results else 1.0,
-        "energy_source": "nvml-total-energy-plus-rapl" if energy is not None else "unavailable",
+        "energy_source": "+".join(energy_sources) if energy_sources else "unavailable",
+        "metric_evidence": {
+            "performance": "measured",
+            "energy": "measured" if energy is not None else "unavailable",
+        },
+        "process_cpu_seconds": process_cpu,
+        "cgroup_cpu": cgroup_cpu,
     }
+
+
+async def _report_transaction_events(
+    client: httpx.AsyncClient,
+    base_url: str,
+    headers: dict[str, str],
+    agent_id: uuid.UUID,
+    desired_state_version: int,
+    transaction_result: Any,
+) -> None:
+    for event in transaction_result.events:
+        action = str(event["action"])
+        status = (
+            "failed"
+            if not transaction_result.passed
+            else "rolled_back"
+            if "rollback" in action
+            else "completed"
+        )
+        response = await client.post(
+            f"{base_url}/api/v1/agents/{agent_id}/events",
+            headers=headers,
+            json={
+                "desiredStateVersion": desired_state_version,
+                "control": event["control"],
+                "action": action,
+                "status": status,
+                "result": event["result"],
+            },
+        )
+        response.raise_for_status()
 
 
 async def _run_assigned_benchmark(
@@ -211,6 +308,7 @@ async def _run_assigned_benchmark(
     desired_state_version: int,
     collector: SystemCollector,
     transaction: ControlTransaction,
+    profile_changed: Callable[[str], None],
 ) -> None:
     configuration = assignment.get("configuration") or {}
     warmup = int(configuration.get("warmupSeconds", 60))
@@ -222,7 +320,16 @@ async def _run_assigned_benchmark(
         for value in configuration.get("promptIds", ["returns", "shipping", "exchange", "delay"])
     )
     benchmark_id = str(assignment["id"])
-    transaction.restore()
+    initial_restore = transaction.restore()
+    await _report_transaction_events(
+        client,
+        base_url,
+        headers,
+        agent_id,
+        desired_state_version,
+        initial_restore,
+    )
+    profile_changed("observe")
     try:
         await _benchmark_phase(
             client,
@@ -246,11 +353,28 @@ async def _run_assigned_benchmark(
             collector,
             prompt_ids,
         )
-        transaction.restore()
+        baseline_restore = transaction.restore()
+        await _report_transaction_events(
+            client,
+            base_url,
+            headers,
+            agent_id,
+            desired_state_version,
+            baseline_restore,
+        )
         await asyncio.sleep(cooldown)
         applied = transaction.apply({"profile": str(assignment["profile"])})
+        await _report_transaction_events(
+            client,
+            base_url,
+            headers,
+            agent_id,
+            desired_state_version,
+            applied,
+        )
         if not applied.passed:
             raise RuntimeError("Benchmark optimization profile failed to apply")
+        profile_changed(str(assignment["profile"]))
         optimized = await _benchmark_phase(
             client,
             base_url,
@@ -262,8 +386,35 @@ async def _run_assigned_benchmark(
             collector,
             prompt_ids,
         )
+    except Exception as exc:
+        failure = await client.post(
+            f"{base_url}/api/v1/agents/{agent_id}/events",
+            headers=headers,
+            json={
+                "desiredStateVersion": desired_state_version,
+                "control": "benchmark",
+                "action": "failed",
+                "status": "failed",
+                "result": {
+                    "benchmarkId": benchmark_id,
+                    "error": type(exc).__name__,
+                    "evidence": "measured",
+                },
+            },
+        )
+        failure.raise_for_status()
+        raise
     finally:
-        transaction.restore()
+        rollback = transaction.restore()
+        profile_changed("observe")
+        await _report_transaction_events(
+            client,
+            base_url,
+            headers,
+            agent_id,
+            desired_state_version,
+            rollback,
+        )
     result = await client.post(
         f"{base_url}/api/v1/agents/{agent_id}/events",
         headers=headers,
@@ -317,6 +468,11 @@ async def run() -> None:
     last_detection = loop.time()
     guardrail_failures = 0
     transaction: ControlTransaction | None = None
+    benchmark_task: asyncio.Task[None] | None = None
+
+    def set_active_profile(value: str) -> None:
+        nonlocal active_profile
+        active_profile = value
 
     async with httpx.AsyncClient(timeout=10) as client:
         while not stop.is_set():
@@ -343,6 +499,13 @@ async def run() -> None:
         try:
             while not stop.is_set():
                 now = loop.time()
+                if benchmark_task is not None and benchmark_task.done():
+                    try:
+                        await benchmark_task
+                        detection_errors.pop("benchmark", None)
+                    except Exception as exc:
+                        detection_errors["benchmark"] = f"Benchmark failed: {type(exc).__name__}"
+                    benchmark_task = None
                 if now - last_detection >= 600:
                     capabilities, detection_errors = detect_capabilities()
                     registration["capabilities"] = capabilities
@@ -364,7 +527,11 @@ async def run() -> None:
                         last_heartbeat_success = now
                         target_version = int(desired["desiredStateVersion"])
                         target_profile = str(desired["desiredProfile"])
-                        if transaction is not None and target_version > applied_version:
+                        if (
+                            transaction is not None
+                            and benchmark_task is None
+                            and target_version > applied_version
+                        ):
                             result = (
                                 transaction.restore()
                                 if target_profile in {"off", "observe"}
@@ -384,20 +551,30 @@ async def run() -> None:
                                 active_profile = target_profile
                                 applied_version = target_version
                         assignment = desired.get("benchmark")
-                        if transaction is not None and isinstance(assignment, dict):
-                            await _run_assigned_benchmark(
-                                client,
-                                base_url,
-                                headers,
-                                agent_id,
-                                assignment,
-                                target_version,
-                                collector,
-                                transaction,
+                        if (
+                            transaction is not None
+                            and benchmark_task is None
+                            and isinstance(assignment, dict)
+                        ):
+                            benchmark_task = asyncio.create_task(
+                                _run_assigned_benchmark(
+                                    client,
+                                    base_url,
+                                    headers,
+                                    agent_id,
+                                    assignment,
+                                    target_version,
+                                    collector,
+                                    transaction,
+                                    set_active_profile,
+                                )
                             )
-                            active_profile = "observe"
-                        if active_profile in {"balanced", "eco"} and _outside_guardrail(
-                            active_profile, desired.get("guardrails", {})
+                        if (
+                            benchmark_task is None
+                            and active_profile in {"balanced", "eco"}
+                            and _outside_guardrail(
+                                active_profile, desired.get("guardrails", {})
+                            )
                         ):
                             guardrail_failures += 1
                         else:
@@ -493,6 +670,10 @@ async def run() -> None:
                 except TimeoutError:
                     pass
         finally:
+            if benchmark_task is not None and not benchmark_task.done():
+                benchmark_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await benchmark_task
             if transaction is not None:
                 transaction.restore()
             collector.close()

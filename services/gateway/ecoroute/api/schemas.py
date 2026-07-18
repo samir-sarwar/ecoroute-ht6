@@ -228,6 +228,7 @@ class ModelEndpointCreate(ApiModel):
     latency_p50_ms: int = Field(ge=0)
     latency_p95_ms: int = Field(ge=0)
     self_hosted: bool
+    node_agent_id: uuid.UUID | None = None
     slm_profile_id: uuid.UUID | None = None
     baseline_concurrency: int = Field(16, ge=1, le=10_000)
     concurrency_target: int = Field(16, ge=1, le=10_000)
@@ -245,6 +246,8 @@ class ModelEndpointCreate(ApiModel):
             raise ValueError("region and gridZone are required")
         if self.concurrency_target > self.baseline_concurrency:
             raise ValueError("concurrencyTarget cannot exceed baselineConcurrency")
+        if self.node_agent_id is not None and not self.self_hosted:
+            raise ValueError("nodeAgentId requires selfHosted=true")
         return self
 
     @field_validator("base_url")

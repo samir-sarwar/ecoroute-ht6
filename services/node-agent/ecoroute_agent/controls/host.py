@@ -93,6 +93,12 @@ class CgroupV2Control:
             self._check_pid(pid, started)
         for pid, started in self.background_pids.items():
             self._check_pid(pid, started)
+        self.root.mkdir(mode=0o755, parents=True, exist_ok=True)
+        subtree_control = self.root / "cgroup.subtree_control"
+        if subtree_control.exists():
+            enabled = set((subtree_control.read_text().strip()).split())
+            if "cpu" not in enabled:
+                _write_value(subtree_control, "+cpu")
         self.inference.mkdir(mode=0o755, parents=True, exist_ok=True)
         self.background.mkdir(mode=0o755, parents=True, exist_ok=True)
         _write_value(self.inference / "cpu.weight", str(plan["inference_weight"]))
@@ -107,12 +113,31 @@ class CgroupV2Control:
     def verify(self, plan: dict[str, Any]) -> dict[str, Any]:
         if not plan["mutate"]:
             return {"passed": True, "changed": False}
-        passed = (
+        values_match = (
             _read_value(self.inference / "cpu.weight") == str(plan["inference_weight"])
             and _read_value(self.background / "cpu.weight") == str(plan["background_weight"])
             and _read_value(self.background / "cpu.max") == str(plan["background_max"])
         )
-        return {"passed": passed}
+        try:
+            inference_path = "/" + str(self.inference.relative_to("/sys/fs/cgroup"))
+            background_path = "/" + str(self.background.relative_to("/sys/fs/cgroup"))
+        except ValueError:
+            inference_path = None
+            background_path = None
+        inference_moved = not self.inference_pids or bool(
+            inference_path
+            and all(self._original_cgroup(pid) == inference_path for pid in self.inference_pids)
+        )
+        background_moved = not self.background_pids or bool(
+            background_path
+            and all(self._original_cgroup(pid) == background_path for pid in self.background_pids)
+        )
+        return {
+            "passed": values_match and inference_moved and background_moved,
+            "valuesMatch": values_match,
+            "inferencePidsMoved": inference_moved,
+            "backgroundPidsMoved": background_moved,
+        }
 
     def rollback(self, snapshot: dict[str, Any]) -> dict[str, Any]:
         for path, key in (

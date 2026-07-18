@@ -187,3 +187,14 @@ def test_production_private_endpoint_requires_explicit_allowlist(
     monkeypatch.setenv("ECOROUTE_ALLOWED_ENDPOINT_HOSTS", "127.0.0.1")
     value = ModelEndpointCreate.model_validate(endpoint_payload("http://127.0.0.1:9000/v1"))
     assert value.base_url == "http://127.0.0.1:9000/v1"
+
+
+def test_node_agent_attachment_requires_self_hosted_endpoint() -> None:
+    payload = endpoint_payload("https://example.com/v1")
+    payload["nodeAgentId"] = str(uuid.uuid4())
+    with pytest.raises(ValidationError, match="nodeAgentId requires selfHosted=true"):
+        ModelEndpointCreate.model_validate(payload)
+
+    payload["selfHosted"] = True
+    value = ModelEndpointCreate.model_validate(payload)
+    assert value.node_agent_id is not None

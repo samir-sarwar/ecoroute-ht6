@@ -1,0 +1,22 @@
+[Unit]
+Description=EcoRoute real Linux kernel-control agent
+After=network-online.target docker.service ecoroute-kernel-target.service ecoroute-kernel-background.service
+Wants=network-online.target
+Requires=ecoroute-kernel-target.service ecoroute-kernel-background.service
+
+[Service]
+Type=simple
+User=root
+EnvironmentFile=/etc/ecoroute-kernel-lab/agent.env
+Environment=PYTHONPATH=/opt/ecoroute-kernel-lab/services/gateway:/opt/ecoroute-kernel-lab/services/node-agent
+ExecStart=/opt/ecoroute-kernel-lab-venv/bin/python -m ecoroute_agent.real_main
+Restart=on-failure
+RestartSec=3
+KillSignal=SIGTERM
+TimeoutStopSec=20
+NoNewPrivileges=true
+ProtectSystem=full
+ReadWritePaths=/var/lib/ecoroute-agent /sys/fs/cgroup
+
+[Install]
+WantedBy=multi-user.target

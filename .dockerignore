@@ -1,0 +1,13 @@
+.DS_Store
+.env
+.git
+.mypy_cache
+.pytest_cache
+.ruff_cache
+.venv
+**/.next
+**/__pycache__
+**/*.pyc
+node_modules
+*.pdf
+

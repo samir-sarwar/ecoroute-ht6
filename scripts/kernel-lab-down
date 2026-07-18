@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+repo_root="$(dirname "$script_dir")"
+instance="ecoroute-kernel-lab"
+
+if limactl list --format '{{.Name}}' | grep -Fxq "$instance"; then
+  limactl shell "$instance" sudo "$repo_root/scripts/kernel-lab-guest" down "$repo_root" || true
+  limactl stop "$instance"
+fi

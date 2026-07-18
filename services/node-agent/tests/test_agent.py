@@ -3,7 +3,11 @@ from pathlib import Path
 import pytest
 from ecoroute_agent.collectors.system import RaplCollector, _RaplCounter
 from ecoroute_agent.controls import host
-from ecoroute_agent.controls.host import GatewayConcurrencyControl, NiceIoniceControl
+from ecoroute_agent.controls.host import (
+    CgroupV2Control,
+    GatewayConcurrencyControl,
+    NiceIoniceControl,
+)
 from ecoroute_agent.controls.transaction import ControlTransaction, SimulatorProfileControl
 from ecoroute_agent.real_main import _energy_counter_kwh
 from ecoroute_agent.simulator import SimulatorModel
@@ -92,6 +96,23 @@ def test_rapl_counter_handles_energy_wrap(tmp_path: Path) -> None:
 
 def test_rapl_microjoules_convert_to_kwh() -> None:
     assert _energy_counter_kwh({"rapl_energy_uj": 3_600_000_000, "gpu": []}) == 1
+
+
+def test_cgroup_control_applies_real_v2_values_in_order(tmp_path: Path) -> None:
+    root = tmp_path / "ecoroute.slice"
+    root.mkdir()
+    (root / "cgroup.subtree_control").write_text("")
+    control = CgroupV2Control(root, [], [], allow_hard_quota=True)
+    plan = control.plan({"profile": "eco"})
+
+    result = control.apply(plan)
+
+    assert result["changed"] is True
+    assert (root / "cgroup.subtree_control").read_text() == "+cpu"
+    assert (root / "inference" / "cpu.weight").read_text() == "900"
+    assert (root / "background" / "cpu.weight").read_text() == "25"
+    assert (root / "background" / "cpu.max").read_text() == "20000 100000"
+    assert control.verify(plan)["passed"] is True
 
 
 def test_nice_control_rejects_pid_reuse(monkeypatch: pytest.MonkeyPatch) -> None:

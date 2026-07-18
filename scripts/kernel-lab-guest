@@ -1,0 +1,296 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+action="${1:-status}"
+repo_root="${2:-/opt/ecoroute-kernel-lab}"
+gateway_url="http://127.0.0.1:8000"
+gateway_key="ecoroute-demo-key"
+agent_token="ecoroute-kernel-lab-token"
+compose_files=(-f "$repo_root/compose.yaml" -f "$repo_root/infra/compose.kernel-lab.yaml")
+
+require_repo() {
+  if [[ ! -f "$repo_root/compose.yaml" || ! -f "$repo_root/pyproject.toml" ]]; then
+    echo "EcoRoute repository not found at $repo_root" >&2
+    exit 1
+  fi
+}
+
+wait_for_url() {
+  local url="$1"
+  local attempts="${2:-90}"
+  local count
+  for ((count = 1; count <= attempts; count++)); do
+    if curl --fail --silent --show-error "$url" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 2
+  done
+  echo "Timed out waiting for $url" >&2
+  return 1
+}
+
+agent_id() {
+  tr -d '[:space:]' </var/lib/ecoroute-agent/agent-id
+}
+
+endpoint_id() {
+  curl --fail --silent --show-error \
+    -H "Authorization: Bearer $gateway_key" \
+    "$gateway_url/api/v1/model-endpoints?limit=200" \
+    | jq -r '.items[] | select(.name == "kernel-lab-cpu") | .id' \
+    | head -n 1
+}
+
+install_lab() {
+  require_repo
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update
+  apt-get install --no-install-recommends -y ca-certificates curl jq python3-venv
+
+  if [[ -e /opt/ecoroute-kernel-lab && ! -L /opt/ecoroute-kernel-lab ]]; then
+    echo "/opt/ecoroute-kernel-lab exists and is not a symlink" >&2
+    exit 1
+  fi
+  ln -sfn "$repo_root" /opt/ecoroute-kernel-lab
+  if [[ ! -x /opt/ecoroute-kernel-lab-venv/bin/python ]]; then
+    python3 -m venv /opt/ecoroute-kernel-lab-venv
+  fi
+  /opt/ecoroute-kernel-lab-venv/bin/pip install --disable-pip-version-check \
+    httpx==0.28.1 psutil==7.2.2 SQLAlchemy==2.0.51
+
+  install -m 0644 \
+    "$repo_root/services/kernel-lab/systemd/ecoroute-kernel-target.service" \
+    /etc/systemd/system/ecoroute-kernel-target.service
+  install -m 0644 \
+    "$repo_root/services/kernel-lab/systemd/ecoroute-kernel-background.service" \
+    /etc/systemd/system/ecoroute-kernel-background.service
+  install -m 0644 \
+    "$repo_root/services/kernel-lab/systemd/ecoroute-kernel-agent.service" \
+    /etc/systemd/system/ecoroute-kernel-agent.service
+  systemctl daemon-reload
+}
+
+start_lab() {
+  install_lab
+  if [[ ! -f "$repo_root/.env" ]]; then
+    cp "$repo_root/.env.example" "$repo_root/.env"
+  fi
+
+  systemctl restart ecoroute-kernel-target.service
+  systemctl restart ecoroute-kernel-background.service
+  wait_for_url "http://127.0.0.1:9100/healthz" 30
+  for _ in {1..30}; do
+    [[ -s /run/ecoroute-kernel-lab/background.pids ]] && break
+    sleep 1
+  done
+  if [[ ! -s /run/ecoroute-kernel-lab/background.pids ]]; then
+    echo "Background workload did not publish its PID list" >&2
+    exit 1
+  fi
+
+  local inference_pid
+  local background_pids
+  inference_pid="$(systemctl show --property MainPID --value ecoroute-kernel-target.service)"
+  background_pids="$(tr -d '[:space:]' </run/ecoroute-kernel-lab/background.pids)"
+  if [[ "$inference_pid" == "0" || -z "$background_pids" ]]; then
+    echo "Kernel workload PIDs are unavailable" >&2
+    exit 1
+  fi
+
+  install -d -m 0700 /etc/ecoroute-kernel-lab /var/lib/ecoroute-agent
+  umask 077
+  {
+    printf 'ECOROUTE_PUBLIC_URL=%s\n' "$gateway_url"
+    printf 'ECOROUTE_AGENT_TOKEN=%s\n' "$agent_token"
+    printf 'ECOROUTE_AGENT_STATE_DIR=/var/lib/ecoroute-agent\n'
+    printf 'ECOROUTE_AGENT_APPROVED_CONTROLS=cgroups_v2,nice_ionice\n'
+    printf 'ECOROUTE_INFERENCE_PIDS=%s\n' "$inference_pid"
+    printf 'ECOROUTE_BACKGROUND_PIDS=%s\n' "$background_pids"
+    printf 'ECOROUTE_CGROUP_ROOT=/sys/fs/cgroup/ecoroute.slice\n'
+    printf 'ECOROUTE_ALLOW_HARD_CPU_QUOTA=true\n'
+  } >/etc/ecoroute-kernel-lab/agent.env
+
+  cd "$repo_root"
+  docker compose "${compose_files[@]}" up --build -d --wait
+  docker compose "${compose_files[@]}" stop agent-simulator >/dev/null 2>&1 || true
+  wait_for_url "$gateway_url/readyz" 90
+
+  systemctl restart ecoroute-kernel-agent.service
+  for _ in {1..45}; do
+    if [[ -s /var/lib/ecoroute-agent/agent-id ]]; then
+      local current_agent_id
+      current_agent_id="$(agent_id)"
+      if curl --fail --silent --show-error \
+        -H "Authorization: Bearer $gateway_key" \
+        "$gateway_url/api/v1/agents/$current_agent_id" >/dev/null 2>&1; then
+        break
+      fi
+    fi
+    sleep 2
+  done
+  if [[ ! -s /var/lib/ecoroute-agent/agent-id ]]; then
+    echo "Real node agent failed to register" >&2
+    systemctl status --no-pager ecoroute-kernel-agent.service >&2 || true
+    exit 1
+  fi
+
+  local current_agent_id
+  local current_endpoint_id
+  local endpoint_payload
+  current_agent_id="$(agent_id)"
+  current_endpoint_id="$(endpoint_id)"
+  endpoint_payload="$(jq -n --arg agent "$current_agent_id" '{
+    name: "kernel-lab-cpu",
+    provider: "openai_compatible",
+    baseUrl: "http://host.docker.internal:9100/v1",
+    credentialRef: null,
+    physicalModel: "ecoroute-kernel-lab",
+    region: "lima-local",
+    gridZone: "lima-local",
+    qualityTier: "small",
+    capabilities: ["text"],
+    contextWindowTokens: 4096,
+    inputUsdPerMillionTokens: 0,
+    outputUsdPerMillionTokens: 0,
+    fixedRequestKwh: 0,
+    inputKwhPer1kTokens: 0,
+    outputKwhPer1kTokens: 0,
+    energyEvidence: "estimated",
+    latencyP50Ms: 100,
+    latencyP95Ms: 500,
+    selfHosted: true,
+    nodeAgentId: $agent,
+    baselineConcurrency: 8,
+    concurrencyTarget: 8,
+    enabled: true
+  }')"
+  if [[ -n "$current_endpoint_id" ]]; then
+    curl --fail --silent --show-error \
+      -X PATCH \
+      -H "Authorization: Bearer $gateway_key" \
+      -H 'Content-Type: application/json' \
+      --data "$endpoint_payload" \
+      "$gateway_url/api/v1/model-endpoints/$current_endpoint_id" >/dev/null
+  else
+    curl --fail --silent --show-error \
+      -X POST \
+      -H "Authorization: Bearer $gateway_key" \
+      -H 'Content-Type: application/json' \
+      --data "$endpoint_payload" \
+      "$gateway_url/api/v1/model-endpoints" >/dev/null
+  fi
+
+  current_endpoint_id="$(endpoint_id)"
+  curl --fail --silent --show-error \
+    -X POST \
+    -H "Authorization: Bearer $gateway_key" \
+    -H 'Content-Type: application/json' \
+    --data '{}' \
+    "$gateway_url/api/v1/model-endpoints/$current_endpoint_id/test" \
+    | jq '{status, provider, providerModel, latencyMs}'
+
+  echo "EcoRoute real kernel lab is ready."
+  echo "Agent: $current_agent_id"
+  echo "Endpoint: $current_endpoint_id"
+  echo "Inference PID: $inference_pid"
+  echo "Background PIDs: $background_pids"
+}
+
+run_demo() {
+  require_repo
+  local current_agent_id
+  local current_endpoint_id
+  current_agent_id="$(agent_id)"
+  current_endpoint_id="$(endpoint_id)"
+  if [[ -z "$current_endpoint_id" ]]; then
+    echo "Kernel lab endpoint is not registered; run kernel-lab-up first" >&2
+    exit 1
+  fi
+
+  curl --fail --silent --show-error \
+    -X POST \
+    -H "Authorization: Bearer $gateway_key" \
+    -H 'Content-Type: application/json' \
+    --data '{"profile":"observe"}' \
+    "$gateway_url/api/v1/agents/$current_agent_id/desired-profile" >/dev/null
+
+  local benchmark
+  local benchmark_id
+  benchmark="$(curl --fail --silent --show-error \
+    -X POST \
+    -H "Authorization: Bearer $gateway_key" \
+    -H 'Content-Type: application/json' \
+    -H "Idempotency-Key: kernel-lab-$(date +%s)" \
+    --data "$(jq -n --arg agent "$current_agent_id" --arg endpoint "$current_endpoint_id" '{
+      agentId: $agent,
+      endpointId: $endpoint,
+      profile: "eco",
+      promptIds: ["returns", "shipping", "exchange", "delay"],
+      warmupSeconds: 5,
+      phaseSeconds: 30,
+      cooldownSeconds: 5,
+      concurrency: 2,
+      outputTokenCap: 64
+    }')" \
+    "$gateway_url/api/v1/benchmarks")"
+  benchmark_id="$(jq -r '.id' <<<"$benchmark")"
+  echo "Benchmark $benchmark_id started (about 70 seconds)."
+
+  local status=""
+  local previous=""
+  local result=""
+  for _ in {1..120}; do
+    result="$(curl --fail --silent --show-error \
+      -H "Authorization: Bearer $gateway_key" \
+      "$gateway_url/api/v1/benchmarks/$benchmark_id")"
+    status="$(jq -r '.status' <<<"$result")"
+    if [[ "$status" != "$previous" ]]; then
+      echo "Benchmark status: $status"
+      previous="$status"
+    fi
+    if [[ "$status" == "completed" || "$status" == "failed" || "$status" == "cancelled" ]]; then
+      break
+    fi
+    sleep 2
+  done
+  if [[ "$status" != "completed" ]]; then
+    echo "Benchmark ended with status $status" >&2
+    jq . <<<"$result" >&2
+    systemctl status --no-pager ecoroute-kernel-agent.service >&2 || true
+    exit 1
+  fi
+  jq '{evidence, baselineMetrics, optimizedMetrics, comparison}' <<<"$result"
+}
+
+show_status() {
+  systemctl is-active ecoroute-kernel-target.service || true
+  systemctl is-active ecoroute-kernel-background.service || true
+  systemctl is-active ecoroute-kernel-agent.service || true
+  if [[ -s /var/lib/ecoroute-agent/agent-id ]]; then
+    curl --fail --silent --show-error \
+      -H "Authorization: Bearer $gateway_key" \
+      "$gateway_url/api/v1/agents/$(agent_id)" \
+      | jq '{id, hostname, status, activeProfile, capabilities, approvedControls, evidence}'
+  fi
+}
+
+stop_lab() {
+  systemctl stop ecoroute-kernel-agent.service 2>/dev/null || true
+  systemctl stop ecoroute-kernel-background.service 2>/dev/null || true
+  systemctl stop ecoroute-kernel-target.service 2>/dev/null || true
+  if [[ -f "$repo_root/compose.yaml" ]]; then
+    cd "$repo_root"
+    docker compose "${compose_files[@]}" down || true
+  fi
+}
+
+case "$action" in
+  up) start_lab ;;
+  demo) run_demo ;;
+  status) show_status ;;
+  down) stop_lab ;;
+  *)
+    echo "Usage: $0 {up|demo|status|down} [repository-root]" >&2
+    exit 2
+    ;;
+esac

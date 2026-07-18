@@ -947,6 +947,8 @@ async def handle_demo_load(job: Job) -> dict[str, Any] | DeferredJob:
                     }
                 if benchmark.status == "cancelled":
                     return {"benchmark_id": str(benchmark.id), "status": "cancelled"}
+                if benchmark.status == "failed":
+                    return {"benchmark_id": str(benchmark.id), "status": "failed"}
                 if benchmark.status == "queued":
                     benchmark.status = "assigned"
                     await session.commit()

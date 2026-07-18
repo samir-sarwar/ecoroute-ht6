@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+repo_root="$(dirname "$script_dir")"
+instance="ecoroute-kernel-lab"
+minimum_kib=$((15 * 1024 * 1024))
+available_kib="$(df -Pk "$repo_root" | awk 'NR == 2 {print $4}')"
+
+if ((available_kib < minimum_kib)); then
+  echo "At least 15 GB free disk is required for the Lima VM and Docker images." >&2
+  echo "Currently available: $((available_kib / 1024 / 1024)) GB." >&2
+  exit 1
+fi
+
+if ! command -v limactl >/dev/null 2>&1; then
+  if ! command -v brew >/dev/null 2>&1; then
+    echo "Install Lima first: https://lima-vm.io/docs/installation/" >&2
+    exit 1
+  fi
+  brew install lima
+fi
+
+if limactl list --format '{{.Name}}' | grep -Fxq "$instance"; then
+  limactl start "$instance"
+else
+  limactl start \
+    --tty=false \
+    --name="$instance" \
+    --cpus=4 \
+    --memory=8 \
+    --disk=40 \
+    --vm-type=vz \
+    --mount-writable \
+    --port-forward=3000:3000 \
+    --port-forward=3001:3001 \
+    --port-forward=8000:8000 \
+    template:docker
+fi
+
+limactl shell "$instance" sudo "$repo_root/scripts/kernel-lab-guest" up "$repo_root"
+
+echo "Control Center: http://localhost:3000"
+echo "Support Demo:   http://localhost:3001"
+echo "Run the real benchmark with: ./scripts/kernel-lab-demo"

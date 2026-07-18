@@ -366,6 +366,7 @@ def _endpoint_json(endpoint: ModelEndpoint) -> dict[str, Any]:
         "latencyP50Ms": endpoint.latency_p50_ms,
         "latencyP95Ms": endpoint.latency_p95_ms,
         "selfHosted": endpoint.self_hosted,
+        "nodeAgentId": str(endpoint.node_agent_id) if endpoint.node_agent_id else None,
         "slmProfileId": str(endpoint.slm_profile_id) if endpoint.slm_profile_id else None,
         "enabled": endpoint.enabled,
         "healthState": endpoint.health_state,
@@ -670,6 +671,10 @@ async def create_endpoint(
             or profile.deleted_at is not None
         ):
             raise EcoRouteError("SLM profile not found", status_code=404, code="not_found")
+    if body.node_agent_id is not None:
+        agent = await session.get(NodeAgent, body.node_agent_id)
+        if agent is None or agent.workspace_id != workspace.id:
+            raise EcoRouteError("Node agent not found", status_code=404, code="not_found")
     payload["capabilities"] = sorted(payload["capabilities"])
     payload["fixed_request_kwh"] = float(payload["fixed_request_kwh"])
     payload["input_kwh_per_1k_tokens"] = float(payload["input_kwh_per_1k_tokens"])
@@ -721,6 +726,7 @@ async def patch_endpoint(
         "latencyP50Ms": endpoint.latency_p50_ms,
         "latencyP95Ms": endpoint.latency_p95_ms,
         "selfHosted": endpoint.self_hosted,
+        "nodeAgentId": endpoint.node_agent_id,
         "slmProfileId": endpoint.slm_profile_id,
         "enabled": endpoint.enabled,
         "baselineConcurrency": endpoint.baseline_concurrency,
@@ -736,6 +742,11 @@ async def patch_endpoint(
             or profile.deleted_at is not None
         ):
             raise EcoRouteError("SLM profile not found", status_code=404, code="not_found")
+    agent_id = validated.get("node_agent_id")
+    if agent_id is not None:
+        agent = await session.get(NodeAgent, agent_id)
+        if agent is None or agent.workspace_id != endpoint.workspace_id:
+            raise EcoRouteError("Node agent not found", status_code=404, code="not_found")
     validated["capabilities"] = sorted(validated["capabilities"])
     for key, value in validated.items():
         setattr(endpoint, key, float(value) if key.endswith("_kwh") else value)
@@ -4056,6 +4067,7 @@ async def agent_event(
     if event_agent is None:
         raise EcoRouteError("Agent not registered", status_code=404, code="not_found")
     benchmark_completed: Benchmark | None = None
+    benchmark_failed: Benchmark | None = None
     if body.get("control") == "benchmark" and body.get("status") == "completed":
         result = body.get("result") or {}
         try:
@@ -4119,6 +4131,19 @@ async def agent_event(
             "qualityChange": round(
                 float(optimized["quality_score"]) - float(baseline["quality_score"]), 4
             ),
+            "backgroundCpuChangePct": percentage(
+                (baseline.get("process_cpu_seconds") or {}).get("background"),
+                (optimized.get("process_cpu_seconds") or {}).get("background"),
+            ),
+            "inferenceCpuChangePct": percentage(
+                (baseline.get("process_cpu_seconds") or {}).get("inference"),
+                (optimized.get("process_cpu_seconds") or {}).get("inference"),
+            ),
+            "optimizedBackgroundThrottledUsec": (
+                ((optimized.get("cgroup_cpu") or {}).get("background") or {}).get(
+                    "throttled_usec"
+                )
+            ),
         }
         benchmark_completed.status = "completed"
         benchmark_completed.completed_at = utcnow()
@@ -4128,6 +4153,28 @@ async def agent_event(
             benchmark_agent.desired_profile = "observe"
             benchmark_agent.active_profile = "observe"
             benchmark_agent.desired_state_version += 1
+    if body.get("control") == "benchmark" and body.get("status") == "failed":
+        result = body.get("result") or {}
+        try:
+            benchmark_id = uuid.UUID(str(result["benchmarkId"]))
+        except (KeyError, ValueError) as exc:
+            raise EcoRouteError(
+                "Benchmark failure requires benchmarkId", code="invalid_benchmark_result"
+            ) from exc
+        benchmark_failed = await session.get(Benchmark, benchmark_id)
+        if benchmark_failed is None or benchmark_failed.agent_id != agent_id:
+            raise EcoRouteError("Benchmark not found", status_code=404, code="not_found")
+        if benchmark_failed.status not in {"assigned", "running"}:
+            raise EcoRouteError(
+                "Benchmark is not accepting results",
+                status_code=409,
+                code="invalid_state_transition",
+            )
+        benchmark_failed.status = "failed"
+        benchmark_failed.completed_at = utcnow()
+        event_agent.desired_profile = "observe"
+        event_agent.active_profile = "observe"
+        event_agent.desired_state_version += 1
     if body.get("control") == "gateway_concurrency" and body.get("status") == "completed":
         target = int((body.get("result") or {}).get("target", 0))
         if target < 1:
@@ -4169,16 +4216,18 @@ async def agent_event(
                 "status": body.get("status", "completed"),
             },
         )
-        if benchmark_completed is not None:
+        if benchmark_completed is not None or benchmark_failed is not None:
+            published_benchmark = benchmark_completed or benchmark_failed
+            assert published_benchmark is not None
             await publish_event(
                 redis,
                 settings,
                 agent.workspace_id,
                 "benchmark.status",
                 {
-                    "benchmarkId": str(benchmark_completed.id),
-                    "status": "completed",
-                    "comparison": benchmark_completed.comparison,
+                    "benchmarkId": str(published_benchmark.id),
+                    "status": published_benchmark.status,
+                    "comparison": published_benchmark.comparison,
                 },
             )
     return {"accepted": True}

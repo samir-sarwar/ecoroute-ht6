@@ -10,6 +10,8 @@ def detect_capabilities() -> tuple[dict[str, bool], dict[str, str]]:
     errors: dict[str, str] = {}
     is_linux = platform.system().lower() == "linux"
     cgroup = Path("/sys/fs/cgroup/cgroup.controllers")
+    cgroup_root = Path(os.getenv("ECOROUTE_CGROUP_ROOT", "/sys/fs/cgroup/ecoroute.slice"))
+    writable_cgroup_path = cgroup_root if cgroup_root.exists() else cgroup_root.parent
     rapl_paths = list(Path("/sys/class/powercap").glob("intel-rapl*/energy_uj")) if is_linux else []
     nvml = False
     nvml_energy = False
@@ -41,7 +43,9 @@ def detect_capabilities() -> tuple[dict[str, bool], dict[str, str]]:
         "nvml_energy": nvml_energy,
         "nvml_power_limit": nvml_limit,
         "rapl": bool(rapl_paths),
-        "cgroups_v2": is_linux and cgroup.exists() and os.access(cgroup.parent, os.R_OK | os.W_OK),
+        "cgroups_v2": is_linux
+        and cgroup.exists()
+        and os.access(writable_cgroup_path, os.R_OK | os.W_OK),
         "nice_ionice": is_linux and shutil.which("ionice") is not None,
         "sched_ext": is_linux and Path("/sys/kernel/sched_ext/state").exists(),
         "napi_netdev_genl": is_linux and shutil.which("ynl") is not None,
