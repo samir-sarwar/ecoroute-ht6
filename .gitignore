@@ -1,22 +1,44 @@
+# --- secrets (NEVER commit) ---
 .env
-.venv/
+.env.*
+!.env.example
+
+# --- large / regenerable data ---
+# RouterBench raw is 1.2 GB and downloadable from HuggingFace; regenerate the
+# jsonl datasets from it with scripts/build_router_dataset.py. The generated
+# training jsonl files ARE committed (small, reproducible training inputs).
+*.pkl
+data/routerbench/*.pkl
+training/**/configs/*.rendered.toml
+training/**/dataset/generated/
+
+# --- python ---
 __pycache__/
+*.pyc
 *.py[cod]
+.venv/
+venv/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+*.egg-info/
+coverage.xml
+.coverage
+
+# --- node ---
 node_modules/
 .next/
 playwright-report/
 test-results/
 dist/
 build/
-*.egg-info/
+
+# --- os / editor noise ---
 .DS_Store
-coverage.xml
-.coverage
-training/**/configs/*.rendered.toml
-training/**/dataset/generated/
+Thumbs.db
+*.log
+
+# --- misc ---
 agent-state/
 
 # Local reference artifacts and history helper

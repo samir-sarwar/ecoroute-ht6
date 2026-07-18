@@ -3,14 +3,14 @@ algorithm = "sft"
 thinking = false
 
 [environment]
-id = "${FREESOLO_ENVIRONMENT_ID}"
+id = "ht6/support-slm"
 
 [environment.params]
 split = "train"
 
 [train]
 epochs = 3
-max_examples = 1500
+max_examples = 2400
 lora_rank = 32
 lora_alpha = 64
 max_context_tokens = 4096
