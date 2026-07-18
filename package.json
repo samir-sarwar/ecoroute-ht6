@@ -1,0 +1,17 @@
+{
+  "name": "ecoroute",
+  "private": true,
+  "packageManager": "pnpm@9.12.3",
+  "scripts": {
+    "dev": "pnpm --parallel --filter './apps/*' dev",
+    "build": "pnpm --recursive --filter './apps/*' build",
+    "lint": "pnpm --recursive --filter './apps/*' lint",
+    "typecheck": "pnpm --recursive --filter './apps/*' typecheck",
+    "generate:api": "openapi-typescript http://localhost:8000/openapi.json -o packages/api-client/src/schema.d.ts"
+  },
+  "devDependencies": {
+    "@grnsft/if": "1.1.1",
+    "openapi-typescript": "7.13.0",
+    "typescript": "5.9.3"
+  }
+}

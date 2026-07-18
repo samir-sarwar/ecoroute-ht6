@@ -1,0 +1,72 @@
+[build-system]
+requires = ["setuptools==80.9.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ecoroute-workspace"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi==0.139.2",
+  "uvicorn[standard]==0.51.0",
+  "pydantic==2.13.4",
+  "pydantic-settings==2.14.2",
+  "python-dotenv==1.2.2",
+  "SQLAlchemy==2.0.51",
+  "greenlet==3.5.3",
+  "asyncpg==0.31.0",
+  "alembic==1.18.5",
+  "redis==8.0.1",
+  "httpx==0.28.1",
+  "jsonschema==4.26.0",
+  "pgvector==0.5.0",
+  "prometheus-client==0.25.0",
+  "structlog==26.1.0",
+  "google-genai==2.12.1",
+  "freesolo-flash==1.0.0",
+  "freesolo==0.2.56",
+  "PyYAML==6.0.3",
+  "psutil==7.2.2",
+  "nvidia-ml-py==13.610.43",
+]
+
+[project.optional-dependencies]
+providers = ["litellm==1.92.0", "orjson==3.11.9"]
+embeddings = ["sentence-transformers==5.6.0"]
+dev = [
+  "mypy==2.3.0",
+  "pytest==9.1.1",
+  "pytest-asyncio==1.4.0",
+  "ruff==0.15.22",
+  "openai==2.45.0",
+  "types-psutil==7.2.2.20260518",
+  "types-PyYAML==6.0.12.20260518",
+]
+
+[tool.setuptools.packages.find]
+where = ["services/gateway", "services/worker", "services/node-agent"]
+include = ["ecoroute*", "ecoroute_worker*", "ecoroute_agent*"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+extend-exclude = ["services/gateway/alembic/versions"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "ASYNC"]
+ignore = ["B008", "E501", "UP017"]
+
+[tool.mypy]
+python_version = "3.12"
+plugins = ["pydantic.mypy"]
+strict = true
+exclude = ["services/gateway/alembic"]
+
+[[tool.mypy.overrides]]
+module = ["jsonschema", "jsonschema.*", "sentence_transformers", "sentence_transformers.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["services/gateway/tests", "services/worker/tests", "services/node-agent/tests"]
+pythonpath = ["services/gateway", "services/worker", "services/node-agent"]

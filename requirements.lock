@@ -1,0 +1,25 @@
+# Runtime lock for the Python 3.12 containers. Regenerate intentionally after compatibility review.
+fastapi==0.139.2
+uvicorn[standard]==0.51.0
+pydantic==2.13.4
+pydantic-settings==2.14.2
+python-dotenv==1.2.2
+SQLAlchemy==2.0.51
+greenlet==3.5.3
+asyncpg==0.31.0
+alembic==1.18.5
+redis==8.0.1
+httpx==0.28.1
+jsonschema==4.26.0
+litellm==1.92.0
+orjson==3.11.9
+pgvector==0.5.0
+sentence-transformers==5.6.0
+prometheus-client==0.25.0
+structlog==26.1.0
+google-genai==2.12.1
+freesolo-flash==1.0.0
+freesolo==0.2.56
+PyYAML==6.0.3
+psutil==7.2.2
+nvidia-ml-py==13.610.43
