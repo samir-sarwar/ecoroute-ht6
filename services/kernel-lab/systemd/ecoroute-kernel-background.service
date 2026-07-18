@@ -1,0 +1,18 @@
+[Unit]
+Description=EcoRoute controlled background CPU contention
+After=network-online.target
+
+[Service]
+Type=simple
+RuntimeDirectory=ecoroute-kernel-lab
+ExecStart=/usr/bin/python3 /opt/ecoroute-kernel-lab/services/kernel-lab/background.py --workers 4 --pid-file /run/ecoroute-kernel-lab/background.pids
+Restart=on-failure
+RestartSec=2
+KillMode=control-group
+TimeoutStopSec=10
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+
+[Install]
+WantedBy=multi-user.target

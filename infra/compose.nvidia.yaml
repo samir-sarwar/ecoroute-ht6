@@ -1,0 +1,6 @@
+services:
+  # Optional example only. Configure VLLM_BASE_URL to a separately provisioned vLLM host.
+  gateway:
+    environment:
+      VLLM_BASE_URL: ${VLLM_BASE_URL:-}
+

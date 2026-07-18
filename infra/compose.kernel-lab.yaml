@@ -1,0 +1,13 @@
+services:
+  gateway:
+    environment:
+      ECOROUTE_AGENT_TOKEN: ecoroute-kernel-lab-token
+      ECOROUTE_AGENT_APPROVED_CONTROLS: cgroups_v2,nice_ionice
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    build:
+      args:
+        PRELOAD_EMBEDDING_MODEL: "false"
+
+  agent-simulator:
+    profiles: ["simulator"]

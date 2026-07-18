@@ -1,0 +1,38 @@
+name: ecoroute-integration
+
+services:
+  postgres:
+    image: pgvector/pgvector:0.8.5-pg17
+    environment:
+      POSTGRES_USER: ecoroute
+      POSTGRES_PASSWORD: ecoroute
+      POSTGRES_DB: ecoroute_test
+    ports: ["127.0.0.1:55432:5432"]
+    tmpfs: [/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ecoroute -d ecoroute_test"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  redis:
+    image: redis:8.0.2-alpine
+    ports: ["127.0.0.1:56379:6379"]
+    tmpfs: [/data]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  carbon-aware:
+    image: python:3.12.11-slim
+    command: ["python", "/app/server.py"]
+    volumes:
+      - ./carbon-aware/server.py:/app/server.py:ro
+    ports: ["127.0.0.1:58080:8080"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/healthz')"]
+      interval: 2s
+      timeout: 2s
+      retries: 30

@@ -1,0 +1,18 @@
+[Unit]
+Description=EcoRoute CPU-bound OpenAI-compatible kernel benchmark target
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=ECOROUTE_LAB_PORT=9100
+Environment=ECOROUTE_LAB_PBKDF2_ITERATIONS=180000
+ExecStart=/usr/bin/python3 /opt/ecoroute-kernel-lab/services/kernel-lab/target.py
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+
+[Install]
+WantedBy=multi-user.target

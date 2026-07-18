@@ -1,0 +1,4 @@
+name: ecoroute
+
+include:
+  - infra/compose.yaml

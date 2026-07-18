@@ -1,0 +1,28 @@
+FROM python:3.12.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app/services/gateway:/app/services/worker:/app/services/node-agent \
+    HF_HOME=/opt/ecoroute/huggingface
+WORKDIR /app
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+COPY requirements.lock /app/requirements.lock
+# PyPI's Linux ARM resolver currently selects CUDA-enabled PyTorch wheels even for
+# the laptop CPU image. Install the official CPU wheel first so the
+# sentence-transformers dependency remains local without pulling unused CUDA
+# runtimes into every EcoRoute service image.
+RUN pip install --no-cache-dir \
+      --index-url https://download.pytorch.org/whl/cpu \
+      torch==2.10.0
+RUN pip install --no-cache-dir -r /app/requirements.lock
+ARG PRELOAD_EMBEDDING_MODEL=true
+RUN if [ "$PRELOAD_EMBEDDING_MODEL" = "true" ]; then \
+      python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')"; \
+    fi
+COPY services /app/services
+COPY training /app/training
+COPY pyproject.toml /app/pyproject.toml
+
+CMD ["uvicorn", "ecoroute.main:app", "--host", "0.0.0.0", "--port", "8000"]
