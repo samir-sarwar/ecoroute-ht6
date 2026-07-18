@@ -19,3 +19,7 @@ training/**/configs/*.rendered.toml
 training/**/dataset/generated/
 agent-state/
 
+# Local reference artifacts and history helper
+ECOROUTE_TECHNICAL_SPEC.md
+*.pdf
+seeddata.sh
