@@ -1,0 +1,18 @@
+[Unit]
+Description=EcoRoute Node Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ecoroute-agent
+EnvironmentFile=/etc/ecoroute-agent.env
+ExecStart=/opt/ecoroute-agent/bin/python -m ecoroute_agent.real_main
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/ecoroute-agent /sys/fs/cgroup/ecoroute.slice
+
+[Install]
+WantedBy=multi-user.target
