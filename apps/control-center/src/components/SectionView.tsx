@@ -2846,7 +2846,7 @@ function SlmStudioView() {
               <h2>Generate candidate examples</h2>
               <p>
                 {trainingKind === "support_slm"
-                  ? "Gemini runs offline in batches of at most 50. Every record is normalized, embedded locally, deduplicated, scanned, balanced, and left unapproved."
+                  ? "Gemini runs offline in batches of at most 10. Every record is normalized, embedded locally, deduplicated, scanned, balanced, and left unapproved."
                   : "Router datasets use the same local validation, deduplication, grouped split, review, approval, and immutable manifest pipeline."}
               </p>
               <div className="metric-grid compact-metrics">

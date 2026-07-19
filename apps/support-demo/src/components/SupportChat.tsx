@@ -1,11 +1,16 @@
 "use client";
 
-import { ArrowUp, Check, CircleStop, Headphones, Package, RotateCcw, Send, ShieldCheck, Truck } from "lucide-react";
+import { ArrowUp, Check, CircleStop, Headphones, Package, RotateCcw, Send, ShieldCheck, Truck, Zap } from "lucide-react";
 import { FormEvent, KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
 
 type Message = { id: string; role: "user" | "assistant"; content: string; state?: "streaming" | "error" };
 type Order = { number: string; item: string; status: string; returnEligible: boolean };
-type HostingMode = "regular" | "self_hosted";
+type GridOverride = {
+  enabled: boolean;
+  scenario: string | null;
+  intensityGco2Kwh: number | null;
+  evidence: "live" | "simulated";
+};
 
 const suggestions = [
   ["Returns", "What is your return window for unused items?", RotateCcw],
@@ -22,23 +27,47 @@ export function SupportChat() {
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
   const [order, setOrder] = useState<Order | null>(null);
-  const [hostingMode, setHostingMode] = useState<HostingMode>("regular");
+  const [gridOverride, setGridOverride] = useState<GridOverride>({
+    enabled: false,
+    scenario: null,
+    intensityGco2Kwh: null,
+    evidence: "live",
+  });
+  const [gridBusy, setGridBusy] = useState(false);
   const controller = useRef<AbortController | null>(null);
   const messageEnd = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    fetch("/api/grid-override")
+      .then((response) => response.ok ? response.json() : null)
+      .then((payload: GridOverride | null) => {
+        if (active && payload) setGridOverride(payload);
+      })
+      .catch(() => undefined);
+    return () => { active = false; };
+  }, []);
 
   useEffect(() => {
     messageEnd.current?.scrollIntoView({ block: "nearest" });
   }, [messages]);
 
-  useEffect(() => {
-    const saved = sessionStorage.getItem("northstar-hosting-mode");
-    if (saved === "regular" || saved === "self_hosted") setHostingMode(saved);
-  }, []);
-
-  function selectHostingMode(mode: HostingMode) {
-    if (sending) return;
-    setHostingMode(mode);
-    sessionStorage.setItem("northstar-hosting-mode", mode);
+  async function toggleGridOverride() {
+    if (gridBusy) return;
+    setGridBusy(true);
+    try {
+      const response = await fetch("/api/grid-override", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled: !gridOverride.enabled }),
+      });
+      if (!response.ok) throw new Error("grid override unavailable");
+      setGridOverride(await response.json());
+    } catch {
+      setGridOverride((current) => current);
+    } finally {
+      setGridBusy(false);
+    }
   }
 
   async function send(message = draft) {
@@ -60,13 +89,13 @@ export function SupportChat() {
           sessionId,
           messageId: user.id,
           orderNumber: order?.number ?? null,
-          hostingMode,
+          hostingMode: "regular",
         }),
         signal: controller.current.signal,
       });
       if (!response.ok || !response.body) {
-        const failure = await response.json().catch(() => ({}));
-        throw new Error(failure.code === "self_hosted_unavailable" ? "self_hosted_unavailable" : "unavailable");
+        await response.json().catch(() => ({}));
+        throw new Error("unavailable");
       }
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
@@ -94,8 +123,7 @@ export function SupportChat() {
       if ((error as Error).name === "AbortError") {
         setMessages((current) => current.filter((item) => item.id !== assistant.id));
       } else {
-        const unavailable = error instanceof Error && error.message === "self_hosted_unavailable";
-        setMessages((current) => current.map((item) => item.id === assistant.id ? { ...item, content: unavailable ? "The self-hosted EcoRoute VM is unavailable. Start Ollama and the kernel lab, then try again." : "Support is temporarily unavailable. Please try again in a moment.", state: "error" } : item));
+        setMessages((current) => current.map((item) => item.id === assistant.id ? { ...item, content: "Support is temporarily unavailable. Please try again in a moment.", state: "error" } : item));
       }
     } finally {
       setSending(false);
@@ -115,13 +143,6 @@ export function SupportChat() {
         <section className="intro"><div className="support-icon"><Headphones /></div><div><p className="kicker">CUSTOMER CARE</p><h1>Help &amp; Support</h1><p>Answers for orders, delivery, returns, and exchanges.</p></div></section>
         <div className="content-grid">
           <section className="conversation" aria-label="Support conversation">
-            <div className="hosting-selector">
-              <div><strong>Inference host</strong><span>{hostingMode === "regular" ? "Cloud-hosted support SLM" : "EcoRoute VM · Ollama llama3.2:1b"}</span></div>
-              <div className="hosting-toggle" role="group" aria-label="Inference host">
-                <button type="button" aria-pressed={hostingMode === "regular"} onClick={() => selectHostingMode("regular")} disabled={sending}>Regular host</button>
-                <button type="button" aria-pressed={hostingMode === "self_hosted"} onClick={() => selectHostingMode("self_hosted")} disabled={sending}>Self hosted</button>
-              </div>
-            </div>
             <div className="messages" aria-live="polite" aria-busy={sending}>
               {messages.map((message) => <div className={`message-row ${message.role}`} key={message.id}><div className="avatar">{message.role === "assistant" ? "N" : "You"}</div><div className={`bubble ${message.state ?? ""}`}>{message.content || <span className="typing"><i /><i /><i /></span>}{message.state === "error" ? <button onClick={() => send(messages.at(-2)?.content ?? "")}>Try again</button> : null}</div></div>)}
               <div ref={messageEnd} />
@@ -134,7 +155,24 @@ export function SupportChat() {
           </aside>
         </div>
       </main>
-      <footer>© 2026 Northstar Outfitters · Fictional store for demonstration purposes</footer>
+      <footer>
+        <span>© 2026 Northstar Outfitters · Fictional store for demonstration purposes</span>
+        <button
+          type="button"
+          className={`grid-demo-switch ${gridOverride.enabled ? "active" : ""}`}
+          role="switch"
+          aria-checked={gridOverride.enabled}
+          disabled={gridBusy}
+          onClick={toggleGridOverride}
+        >
+          <Zap size={14} />
+          <span>
+            {gridOverride.enabled
+              ? `Dirty grid ${Math.round(gridOverride.intensityGco2Kwh ?? 650)} gCO2/kWh`
+              : "Live grid"}
+          </span>
+        </button>
+      </footer>
     </div>
   );
 }

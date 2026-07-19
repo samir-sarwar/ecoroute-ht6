@@ -48,6 +48,7 @@ async def _finish_job(job_id: uuid.UUID, output: dict[str, Any]) -> Job | None:
             return None
         job.output = output
         job.status = "completed"
+        job.error = None
         job.locked_at = None
         job.completed_at = utcnow()
         await session.commit()

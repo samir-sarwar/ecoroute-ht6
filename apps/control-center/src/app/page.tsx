@@ -42,6 +42,13 @@ const precise = new Intl.NumberFormat("en-CA", { maximumSignificantDigits: 4 });
 
 type ImpactMetric = "carbon" | "energy" | "cost";
 
+type GridOverride = {
+  enabled: boolean;
+  scenario: string | null;
+  intensityGco2Kwh: number | null;
+  evidence: "live" | "simulated";
+};
+
 type CandidateView = {
   endpoint_id?: string;
   endpointId?: string;
@@ -298,6 +305,10 @@ export default function Overview() {
     queryKey: ["overview"],
     queryFn: () => api<OverviewResponse>("/overview?window=1h"),
   });
+  const gridOverride = useQuery({
+    queryKey: ["grid-override"],
+    queryFn: () => api<GridOverride>("/demo/grid-override"),
+  });
   const grid = useMutation({
     mutationFn: (scenario: string) =>
       api("/demo/grid-scenario", {
@@ -305,6 +316,17 @@ export default function Overview() {
         body: JSON.stringify({ scenario }),
       }),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["overview"] }),
+  });
+  const dirtyGrid = useMutation({
+    mutationFn: (enabled: boolean) =>
+      api<GridOverride>("/demo/grid-override", {
+        method: "POST",
+        body: JSON.stringify({ enabled, scenario: "dirty" }),
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["grid-override"] });
+      queryClient.invalidateQueries({ queryKey: ["overview"] });
+    },
   });
   const failure = useMutation({
     mutationFn: () =>
@@ -666,6 +688,22 @@ export default function Overview() {
           Open a request in Audit to inspect its exact evidence sources.
         </span>
       </aside>
+      <div className="dirty-grid-dock">
+        <span>Grid energy</span>
+        <button
+          type="button"
+          className={`dirty-grid-switch ${gridOverride.data?.enabled ? "active" : ""}`}
+          role="switch"
+          aria-checked={Boolean(gridOverride.data?.enabled)}
+          disabled={dirtyGrid.isPending || gridOverride.isLoading}
+          onClick={() => dirtyGrid.mutate(!gridOverride.data?.enabled)}
+        >
+          <Zap size={15} />
+          {gridOverride.data?.enabled
+            ? `Dirty ${fmt.format(gridOverride.data.intensityGco2Kwh ?? 650)} gCO₂e/kWh`
+            : "Live"}
+        </button>
+      </div>
     </div>
   );
 }

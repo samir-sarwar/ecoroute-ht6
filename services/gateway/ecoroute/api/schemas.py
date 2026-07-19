@@ -96,7 +96,13 @@ class ChatCompletionRequest(BaseModel):
     def validate_metadata(cls, value: dict[str, str] | None) -> dict[str, str] | None:
         if value is None:
             return value
-        allowed = {"demo_session_id", "demo_message_id", "client_app", "ecoroute_debug"}
+        allowed = {
+            "demo_session_id",
+            "demo_message_id",
+            "client_app",
+            "hosting_mode",
+            "ecoroute_debug",
+        }
         return {
             key: item
             for key, item in value.items()

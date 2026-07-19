@@ -41,7 +41,12 @@ from ecoroute.carbon.providers import (
     FixtureCarbonProvider,
     configured_carbon_provider_name,
 )
-from ecoroute.carbon.service import CarbonService
+from ecoroute.carbon.service import (
+    GRID_OVERRIDE_INTENSITIES,
+    GRID_OVERRIDE_KEY,
+    CarbonService,
+    grid_override_state,
+)
 from ecoroute.config import get_settings
 from ecoroute.db.base import utcnow, uuid7
 from ecoroute.db.models import (
@@ -2470,18 +2475,19 @@ async def dataset_detail(
             )
         ).all()
     )
+    review_state = DatasetExample.example_metadata["review"].astext.label("review_state")
     review_counts = list(
         (
             await session.execute(
                 select(
                     DatasetExample.approved,
-                    DatasetExample.example_metadata["review"].astext,
+                    review_state,
                     func.count(DatasetExample.id),
                 )
                 .where(DatasetExample.dataset_id == dataset_id)
                 .group_by(
                     DatasetExample.approved,
-                    DatasetExample.example_metadata["review"].astext,
+                    review_state,
                 )
             )
         ).all()
@@ -3464,6 +3470,47 @@ async def refresh_carbon(
         payload={"zones": [str(zone)[:100] for zone in zones]},
     )
     return {"jobId": str(job.id), "status": job.status}
+
+
+async def _grid_override_payload(redis: Redis) -> dict[str, Any]:
+    scenario = await grid_override_state(redis)
+    return {
+        "enabled": scenario is not None,
+        "scenario": scenario,
+        "intensityGco2Kwh": GRID_OVERRIDE_INTENSITIES[scenario] if scenario else None,
+        "evidence": "simulated" if scenario else "live",
+    }
+
+
+@router.get("/demo/grid-override")
+async def get_grid_override(redis: Redis = Depends(get_redis)) -> dict[str, Any]:
+    return await _grid_override_payload(redis)
+
+
+@router.post("/demo/grid-override")
+async def set_grid_override(
+    body: dict[str, Any],
+    redis: Redis = Depends(get_redis),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    enabled = bool(body.get("enabled", True))
+    scenario = str(body.get("scenario", "dirty"))
+    if enabled:
+        if scenario not in GRID_OVERRIDE_INTENSITIES:
+            raise EcoRouteError("Invalid grid override", code="invalid_grid_override")
+        await redis.set(GRID_OVERRIDE_KEY, scenario)
+    else:
+        await redis.delete(GRID_OVERRIDE_KEY)
+        scenario = "live"
+    workspace = await _workspace(session)
+    await publish_event(
+        redis,
+        settings,
+        workspace.id,
+        "carbon.updated",
+        {"gridOverride": enabled, "scenario": scenario},
+    )
+    return await _grid_override_payload(redis)
 
 
 @router.post("/demo/grid-scenario")

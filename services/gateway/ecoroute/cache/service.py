@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import unicodedata
@@ -9,7 +10,7 @@ from decimal import Decimal
 from typing import Any, cast
 
 from redis.asyncio import Redis
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ecoroute.api.schemas import NormalizedRequestFeatures
@@ -131,6 +132,17 @@ class CacheService:
         ttl_seconds: int,
         task_type: str,
     ) -> CacheEntry:
+        now = datetime.now(timezone.utc)
+        lock_key = int.from_bytes(
+            hashlib.sha256(f"{workspace_id}:{namespace_version}:{fingerprint}".encode()).digest()[
+                :8
+            ],
+            "big",
+            signed=True,
+        )
+        await session.execute(
+            text("SELECT pg_advisory_xact_lock(:lock_key)"), {"lock_key": lock_key}
+        )
         existing = await session.scalar(
             select(CacheEntry).where(
                 CacheEntry.workspace_id == workspace_id,
@@ -140,7 +152,22 @@ class CacheService:
             )
         )
         if existing is not None:
-            existing.invalidated_at = datetime.now(timezone.utc)
+            if existing.expires_at > now:
+                await self.exact_set(
+                    workspace_id,
+                    fingerprint,
+                    {
+                        "completion": existing.completion,
+                        "source_request_id": str(existing.source_request_id),
+                        "source_endpoint_id": str(existing.source_endpoint_id),
+                        "baseline_energy_kwh": existing.baseline_energy_kwh,
+                        "baseline_cost_usd": str(existing.baseline_cost_usd),
+                    },
+                    max(60, int((existing.expires_at - now).total_seconds())),
+                )
+                return existing
+            existing.invalidated_at = now
+            await session.flush()
         entry = CacheEntry(
             workspace_id=workspace_id,
             logical_model_id=logical_model_id,
@@ -160,7 +187,7 @@ class CacheService:
             quality_verdict=quality_verdict,
             baseline_energy_kwh=baseline_energy_kwh,
             baseline_cost_usd=baseline_cost_usd,
-            expires_at=datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds),
+            expires_at=now + timedelta(seconds=ttl_seconds),
         )
         session.add(entry)
         await self.exact_set(

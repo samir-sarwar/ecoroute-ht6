@@ -61,7 +61,7 @@ from ecoroute.routing.engine import (
     select_candidate,
     semantic_cache_eligible,
 )
-from ecoroute.routing.quality import verify_output
+from ecoroute.routing.quality import KNOWN_POLICY_IDS, verify_output
 from ecoroute.routing.safety import normalize_request
 from ecoroute.telemetry import metrics
 
@@ -69,6 +69,29 @@ router = APIRouter()
 settings = get_settings()
 providers = ProviderRegistry(settings)
 stream_connections = asyncio.Semaphore(settings.max_sse_connections)
+
+SUPPORT_CONTRACT_TASKS = {"policy_qa", "summarization", "classification", "extraction"}
+SUPPORT_CONTRACT_RESPONSE_FORMAT: dict[str, Any] = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "support_answer_v1",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "required": ["answer", "confidence", "policy_ids", "needs_human"],
+            "additionalProperties": False,
+            "properties": {
+                "answer": {"type": "string", "minLength": 1},
+                "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                "policy_ids": {
+                    "type": "array",
+                    "items": {"type": "string", "enum": sorted(KNOWN_POLICY_IDS)},
+                },
+                "needs_human": {"type": "boolean"},
+            },
+        },
+    },
+}
 
 
 async def _redis_text(redis: Redis, key: str, default: str) -> str:
@@ -1228,13 +1251,24 @@ async def chat_completions(
     attempt_number = 1
     attempt_start = time.monotonic()
 
+    def request_for_endpoint(endpoint: ModelEndpoint) -> ChatCompletionRequest:
+        if body.response_format is not None:
+            return body
+        if (
+            classification.task_type in SUPPORT_CONTRACT_TASKS
+            and "json_schema" in endpoint.capabilities
+        ):
+            return body.model_copy(update={"response_format": SUPPORT_CONTRACT_RESPONSE_FORMAT})
+        return body
+
     async def invoke(endpoint: ModelEndpoint) -> dict[str, Any]:
         remaining = settings.provider_timeout_seconds - (time.monotonic() - started)
         if remaining <= 0:
             raise ProviderError("Request deadline exceeded", "upstream_timeout", 504)
+        upstream_body = request_for_endpoint(endpoint)
         try:
             async with asyncio.timeout(remaining):
-                return await providers.for_provider(endpoint.provider).chat(endpoint, body)
+                return await providers.for_provider(endpoint.provider).chat(endpoint, upstream_body)
         except TimeoutError as exc:
             raise ProviderError("Upstream timed out", "upstream_timeout", 504) from exc
 
@@ -1389,7 +1423,7 @@ async def chat_completions(
             classification,
             specialized=selected.quality_tier == "specialized",
             force_failure=force_failure,
-            response_format=body.response_format,
+            response_format=request_for_endpoint(selected_row).response_format,
             minimum_support_confidence=policy.min_slm_confidence,
         )
     attempt.quality_verdict = verdict.model_dump(mode="json")
@@ -1472,7 +1506,7 @@ async def chat_completions(
                     fallback_raw,
                     classification,
                     specialized=False,
-                    response_format=body.response_format,
+                    response_format=request_for_endpoint(fallback_row).response_format,
                 )
             selected, selected_row = fallback_candidate, fallback_row
             session.add(

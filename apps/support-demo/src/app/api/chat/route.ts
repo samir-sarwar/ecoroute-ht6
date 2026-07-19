@@ -2,6 +2,12 @@ import { NextRequest } from "next/server";
 
 const gateway = process.env.ECOROUTE_GATEWAY_INTERNAL_URL ?? "http://localhost:8000";
 const key = process.env.ECOROUTE_SUPPORT_DEMO_GATEWAY_KEY ?? "ecoroute-demo-key";
+const regularModel =
+  process.env.ECOROUTE_SUPPORT_DEMO_REGULAR_MODEL ??
+  process.env.ECOROUTE_SUPPORT_DEMO_MODEL ??
+  "support-default";
+const selfHostedModel =
+  process.env.ECOROUTE_SUPPORT_DEMO_SELF_HOSTED_MODEL ?? "support-slm-direct";
 const systemPrompt = `You are the Northstar Outfitters policy assistant.
 Use only the fictional policy facts below. Return exactly one JSON object with answer,
 confidence, policy_ids, and needs_human. Never claim that you performed a customer record change.
@@ -67,7 +73,16 @@ export async function POST(request: NextRequest) {
     }
     const input = JSON.parse(raw) as RequestBody;
     const messages = validatedMessages(input.messages);
-    if (input.hostingMode !== "regular" && input.hostingMode !== "self_hosted") {
+    const hostingMode =
+      input.hostingMode === "self_hosted" || input.hostingMode === "regular"
+        ? input.hostingMode
+        : "regular";
+    if (
+      "hostingMode" in input &&
+      input.hostingMode !== null &&
+      input.hostingMode !== "regular" &&
+      input.hostingMode !== "self_hosted"
+    ) {
       return Response.json({ message: "Choose a valid inference host." }, { status: 400 });
     }
     if (
@@ -88,28 +103,30 @@ export async function POST(request: NextRequest) {
       const last = messages[messages.length - 1];
       last.content += `\n\nSynthetic order context: order ${order.number}; item ${order.item}; delivery state ${order.status}; return eligible ${order.returnEligible}.`;
     }
+    const gatewayMessages = [messages[messages.length - 1]];
+    const model = hostingMode === "self_hosted" ? selfHostedModel : regularModel;
     const upstream = await fetch(`${gateway}/v1/chat/completions`, {
       method: "POST",
       headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
       body: JSON.stringify({
-        model: input.hostingMode === "self_hosted" ? "support-self-hosted" : "support-cloud",
-        messages: [{ role: "system", content: systemPrompt }, ...messages],
+        model,
+        messages: [{ role: "system", content: systemPrompt }, ...gatewayMessages],
         temperature: 0,
-        stream: input.hostingMode === "self_hosted",
-        stream_options: input.hostingMode === "self_hosted" ? { include_usage: true } : undefined,
+        stream: hostingMode === "self_hosted",
+        stream_options: hostingMode === "self_hosted" ? { include_usage: true } : undefined,
         metadata: {
           demo_session_id: input.sessionId,
           demo_message_id: input.messageId,
           client_app: "northstar-support-demo",
-          hosting_mode: input.hostingMode,
+          hosting_mode: hostingMode,
         },
       }),
       signal: request.signal,
     });
     if (!upstream.ok || !upstream.body) {
-      if (input.hostingMode === "self_hosted") {
+      if (hostingMode === "self_hosted") {
         return Response.json(
-          { message: "The self-hosted EcoRoute VM is unavailable.", code: "self_hosted_unavailable" },
+          { message: "The support SLM is unavailable.", code: "support_slm_unavailable" },
           { status: 503 },
         );
       }
@@ -118,7 +135,7 @@ export async function POST(request: NextRequest) {
         { status: 503 },
       );
     }
-    if (input.hostingMode === "regular") {
+    if (hostingMode === "regular") {
       const completion = await upstream.json();
       let content = String(completion.choices?.[0]?.message?.content ?? "");
       try {
@@ -137,7 +154,7 @@ export async function POST(request: NextRequest) {
         id: completion.id ?? `chatcmpl-${input.messageId}`,
         object: "chat.completion.chunk",
         created: completion.created ?? Math.floor(Date.now() / 1000),
-        model: "support-cloud",
+        model,
         choices: [{ index: 0, delta: { role: "assistant", content: content.trim() }, finish_reason: "stop" }],
       };
       return new Response(`data: ${JSON.stringify(chunk)}\n\ndata: [DONE]\n\n`, {
@@ -159,9 +176,9 @@ export async function POST(request: NextRequest) {
         "Content-Type": "text/event-stream",
         "Cache-Control": "no-cache, no-transform",
         "X-Content-Type-Options": "nosniff",
-        "X-Northstar-Hosting-Mode": input.hostingMode,
-        "X-Northstar-Endpoint-Class": input.hostingMode === "self_hosted" ? "ollama-vm" : "cloud-slm",
-        "X-Northstar-Evidence": input.hostingMode === "self_hosted" ? "benchmark-calibrated-estimate" : "provider-estimate",
+        "X-Northstar-Hosting-Mode": hostingMode,
+        "X-Northstar-Endpoint-Class": hostingMode === "self_hosted" ? "support-slm" : "cloud-slm",
+        "X-Northstar-Evidence": "provider-estimate",
       },
     });
   } catch {

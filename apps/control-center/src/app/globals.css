@@ -187,7 +187,7 @@ code { font-family: var(--font-mono); }
 
 /* ============================ Page ============================ */
 
-.page { max-width: 1520px; margin: 0 auto; padding: 32px clamp(20px, 3vw, 44px) 60px; }
+.page { max-width: 1520px; margin: 0 auto; padding: 32px clamp(20px, 3vw, 44px) 96px; }
 
 /* Orchestrated load: each top-level block rises in sequence. */
 .page > * { animation: rise 0.5s cubic-bezier(0.2, 0.7, 0.3, 1) backwards; }
@@ -972,6 +972,47 @@ td .inline-form { padding: 0; gap: 6px; }
   font-family: var(--font-mono); font-size: 10px; color: var(--muted);
 }
 
+.dirty-grid-dock {
+  position: fixed;
+  right: 22px;
+  bottom: 18px;
+  z-index: 42;
+  display: inline-flex; align-items: center; gap: 10px;
+  min-height: 42px;
+  padding: 7px 8px 7px 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 14px 34px rgba(53, 64, 36, 0.16);
+  backdrop-filter: blur(12px);
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+.dirty-grid-switch {
+  min-height: 28px;
+  display: inline-flex; align-items: center; gap: 7px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--raise);
+  color: var(--text);
+  padding: 5px 10px;
+  cursor: pointer;
+  font-family: var(--font-display);
+  font-size: 11px;
+  font-weight: 700;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+.dirty-grid-switch:hover { border-color: var(--read-dim); color: var(--read); }
+.dirty-grid-switch.active {
+  background: var(--danger-wash);
+  border-color: var(--danger-line);
+  color: var(--danger);
+}
+.dirty-grid-switch svg { flex: 0 0 auto; }
+
 /* ============================ Responsive ============================ */
 
 @media (max-width: 1180px) {
@@ -1000,7 +1041,7 @@ td .inline-form { padding: 0; gap: 6px; }
     border: 1px solid var(--line); background: var(--panel); color: var(--text);
   }
   .main-content { margin-left: 0; }
-  .page { padding: 66px 14px 40px; }
+  .page { padding: 66px 14px 102px; }
   .page-header { display: block; }
   .header-status { margin-top: 13px; flex-wrap: wrap; }
   .page-icon { display: none; }
@@ -1039,6 +1080,7 @@ td .inline-form { padding: 0; gap: 6px; }
   .candidate-grid { grid-template-columns: 1fr; }
   .model-parameter-map { grid-template-columns: 1fr; }
   .model-parameter-map > svg { transform: rotate(90deg); }
+  .dirty-grid-dock { left: 14px; right: 14px; bottom: 12px; justify-content: space-between; }
 }
 
 @media (max-width: 380px) {

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -47,6 +48,8 @@ from ecoroute_worker.gemini.generator import GeminiDatasetGenerator, process_exa
 settings = get_settings()
 providers = ProviderRegistry(settings)
 ROOT = Path(__file__).resolve().parents[4]
+DATASET_GENERATION_BATCH_SIZE = 10
+DATASET_GENERATION_BATCH_TIMEOUT_SECONDS = 90
 
 
 class PermanentJobError(RuntimeError):
@@ -141,27 +144,62 @@ async def handle_dataset_generate(job: Job) -> dict[str, Any]:
             raise PermanentJobError("SLM profile has no active policy documents")
         target = min(int(dataset.generation_config.get("target", 100)), 2_000)
         distribution = dataset.generation_config.get("distribution", {})
-        generator = GeminiDatasetGenerator(settings.gemini_api_key, settings.gemini_dataset_model)
-        generated = []
-        for start in range(0, target, 50):
-            count = min(50, target - start)
-            generated.extend(
-                await generator.generate_batch(
-                    batch_id=f"{dataset.id}:{start // 50 + 1}",
-                    business_profile=profile.definition,
+        business_profile = dict(profile.definition)
+        dataset.generation_config = {
+            **dataset.generation_config,
+            "target": target,
+            "distribution": distribution,
+            "batchSize": DATASET_GENERATION_BATCH_SIZE,
+            "generated": 0,
+        }
+        dataset.example_count = 0
+        dataset.manifest_sha256 = None
+        await session.execute(delete(DatasetExample).where(DatasetExample.dataset_id == dataset_id))
+        await session.commit()
+
+    generator = GeminiDatasetGenerator(settings.gemini_api_key, settings.gemini_dataset_model)
+    generated = []
+    for start in range(0, target, DATASET_GENERATION_BATCH_SIZE):
+        count = min(DATASET_GENERATION_BATCH_SIZE, target - start)
+        generated.extend(
+            await asyncio.wait_for(
+                generator.generate_batch(
+                    batch_id=f"{dataset_id}:{start // DATASET_GENERATION_BATCH_SIZE + 1}",
+                    business_profile=business_profile,
                     policies=policies,
                     count=count,
                     distribution=distribution,
-                )
+                ),
+                timeout=DATASET_GENERATION_BATCH_TIMEOUT_SECONDS,
             )
-            await _publish_job_event(
-                job,
-                "training.status",
-                {"datasetId": str(dataset.id), "generated": min(target, start + count)},
-            )
-        processed, manifest = process_examples(generated, set(policies), distribution)
-        if not processed:
-            raise PermanentJobError("all generated examples failed validation")
+        )
+        generated_count = min(target, start + count)
+        async with SessionLocal() as session:
+            current = await session.get(Dataset, dataset_id)
+            if current is None:
+                raise PermanentJobError("dataset no longer exists")
+            if current.status != "generating":
+                raise PermanentJobError("dataset is not in generating state")
+            current.generation_config = {
+                **current.generation_config,
+                "generated": generated_count,
+            }
+            await session.commit()
+        await _publish_job_event(
+            job,
+            "training.status",
+            {"datasetId": str(dataset_id), "generated": generated_count},
+        )
+
+    processed, manifest = process_examples(generated, set(policies), distribution)
+    if not processed:
+        raise PermanentJobError("all generated examples failed validation")
+    async with SessionLocal() as session:
+        dataset = await session.get(Dataset, dataset_id)
+        if dataset is None:
+            raise PermanentJobError("dataset no longer exists")
+        if dataset.status != "generating":
+            raise PermanentJobError("dataset is not in generating state")
         for item in processed:
             session.add(
                 DatasetExample(
@@ -178,12 +216,17 @@ async def handle_dataset_generate(job: Job) -> dict[str, Any]:
         dataset.example_count = len(processed)
         dataset.manifest_sha256 = manifest
         dataset.status = "review_required"
-        await session.commit()
-        return {
-            "dataset_id": str(dataset.id),
-            "example_count": len(processed),
-            "manifest": manifest,
+        dataset.generation_config = {
+            **dataset.generation_config,
+            "generated": target,
+            "accepted": len(processed),
         }
+        await session.commit()
+    return {
+        "dataset_id": str(dataset_id),
+        "example_count": len(processed),
+        "manifest": manifest,
+    }
 
 
 async def handle_dataset_finalize(job: Job) -> dict[str, Any]:
@@ -1081,8 +1124,6 @@ async def handle_demo_load(job: Job) -> dict[str, Any] | DeferredJob:
                     },
                 )
                 return response.status_code
-
-    import asyncio
 
     statuses = await asyncio.gather(*(send(index) for index in range(count)))
     return {

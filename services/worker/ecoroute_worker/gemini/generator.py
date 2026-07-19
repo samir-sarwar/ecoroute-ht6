@@ -75,11 +75,16 @@ class GeminiDatasetGenerator:
 Batch ID: {batch_id}
 Business profile: {json.dumps(business_profile, sort_keys=True)}
 Fictional policy facts: {json.dumps(policies, sort_keys=True)}
+Allowed policy_ids: {json.dumps(sorted(policies), sort_keys=True)}
 Requested distribution: {json.dumps(distribution or {}, sort_keys=True)}
-Create exactly {count} diverse examples. Use only supplied policy facts. Include normal,
-paraphrased, incomplete, adversarial, and out-of-domain inputs as requested. The output field
-must itself be a JSON string with answer, confidence, policy_ids, and needs_human. Out-of-domain
-examples must set needs_human=true and must not invent an answer.
+Create exactly {count} diverse examples. Use the Batch ID as a randomness seed, but do not
+mention it in customer-facing text. Every input must be distinct from generic FAQ wording and
+should vary item types, customer wording, urgency, ambiguity, channel style, and missing context.
+Use only supplied policy facts. Include normal, paraphrased, incomplete, adversarial, and
+out-of-domain inputs as requested. policy_ids must be exact values from Allowed policy_ids, or []
+for out-of-domain examples. The top-level policy_ids and the JSON string's policy_ids must match.
+The output field must itself be a JSON string with answer, confidence, policy_ids, and needs_human.
+Out-of-domain examples must set needs_human=true and must not invent an answer.
 """
         last_error: Exception | None = None
         for _ in range(2):

@@ -66,6 +66,7 @@ button:focus-visible, a:focus-visible, textarea:focus-visible {
   position: relative;
   background: var(--paper);
   isolation: isolate;
+  padding-bottom: 72px;
 }
 
 /* Topographic contour lines — the signature. Concentric rings, like a trail map. */
@@ -355,10 +356,36 @@ button:focus-visible, a:focus-visible, textarea:focus-visible {
 /* ============================ Footer ============================ */
 
 footer {
-  min-height: 56px; display: grid; place-items: center;
+  min-height: 56px; display: flex; align-items: center; justify-content: center; gap: 14px; flex-wrap: wrap;
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 40;
+  background: rgba(234, 238, 226, 0.96);
+  backdrop-filter: blur(12px);
   border-top: 1px solid var(--line);
+  box-shadow: 0 -10px 30px rgba(28, 58, 42, 0.08);
   color: var(--faint); font-size: 11px; padding: 14px; text-align: center;
 }
+
+.grid-demo-switch {
+  min-height: 30px;
+  display: inline-flex; align-items: center; gap: 7px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--paper-2);
+  color: var(--muted);
+  padding: 6px 11px;
+  font-size: 11px; font-weight: 700;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+.grid-demo-switch:hover { border-color: var(--ochre); color: var(--pine); }
+.grid-demo-switch.active {
+  background: var(--clay-wash);
+  border-color: rgba(168, 69, 42, 0.45);
+  color: var(--clay);
+}
+.grid-demo-switch:disabled { cursor: wait; opacity: 0.75; }
+.grid-demo-switch svg { flex: 0 0 auto; }
 
 /* ============================ Responsive ============================ */
 
@@ -383,10 +410,12 @@ footer {
   .hosting-selector { align-items: stretch; flex-direction: column; }
   .hosting-toggle button { flex: 1; }
   .message-row { max-width: 94%; }
-  .composer { position: sticky; bottom: 0; margin: auto 10px 10px; }
+  .composer { position: sticky; bottom: 68px; margin: auto 10px 10px; }
   .composer-footer > span { display: none; }
   .composer-footer { justify-content: flex-end; }
   .support-aside { display: flex; padding: 16px; }
+  footer { justify-content: space-between; gap: 8px; padding: 10px 12px; }
+  footer > span { max-width: 160px; text-align: left; }
 }
 
 @media (prefers-reduced-motion: reduce) {

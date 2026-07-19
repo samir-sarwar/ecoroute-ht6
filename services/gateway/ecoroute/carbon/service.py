@@ -14,6 +14,9 @@ from ecoroute.config import Settings
 from ecoroute.db.base import utcnow
 from ecoroute.db.models import CarbonReadingRecord
 
+GRID_OVERRIDE_KEY = "ecoroute:demo:grid_override"
+GRID_OVERRIDE_INTENSITIES = {"dirty": 650.0}
+
 
 def carbon_cache_key(
     zone: str,
@@ -33,6 +36,17 @@ def carbon_lookup_key(
             f"{data_center_region.casefold().replace('_', '-')}"
         )
     return "zone"
+
+
+async def grid_override_state(redis: Redis) -> str | None:
+    value = await redis.get(GRID_OVERRIDE_KEY)
+    if isinstance(value, bytes):
+        value = value.decode()
+    if value in GRID_OVERRIDE_INTENSITIES:
+        return str(value)
+    if value is not None:
+        await redis.delete(GRID_OVERRIDE_KEY)
+    return None
 
 
 class CarbonService:
@@ -55,6 +69,25 @@ class CarbonService:
                 zone,
                 data_center_provider=data_center_provider,
                 data_center_region=data_center_region,
+            )
+        override = await grid_override_state(self.redis)
+        if override is not None:
+            now = utcnow()
+            return CarbonReading(
+                zone=zone,
+                intensity_gco2_kwh=GRID_OVERRIDE_INTENSITIES[override],
+                observed_at=now,
+                fetched_at=now,
+                source=f"ecoroute-grid-override:{override}",
+                evidence="simulated",
+                metadata={
+                    "available": True,
+                    "lookup_mode": "data_center" if data_center_provider else "zone",
+                    "data_center_provider": data_center_provider,
+                    "data_center_region": data_center_region,
+                    "override": True,
+                    "scenario": override,
+                },
             )
         cache_key = carbon_cache_key(zone, data_center_provider, data_center_region)
         cached = await self.redis.get(cache_key)
