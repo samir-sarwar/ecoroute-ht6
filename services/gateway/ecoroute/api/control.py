@@ -132,6 +132,7 @@ async def _validate_logical_references(
     baseline_id: uuid.UUID,
     fallback_id: uuid.UUID,
     policy_id: uuid.UUID,
+    impact_baseline_id: uuid.UUID | None = None,
 ) -> tuple[list[ModelEndpoint], RoutingPolicy]:
     if not endpoint_ids or len(endpoint_ids) != len(set(endpoint_ids)):
         raise EcoRouteError(
@@ -159,11 +160,16 @@ async def _validate_logical_references(
             "Baseline and fallback must belong to the endpoint pool", code="invalid_pool"
         )
     fallback = next(item for item in endpoints if item.id == fallback_id)
-    if fallback.quality_tier != "frontier" or not fallback.enabled:
+    fixed_singleton = len(endpoints) == 1 and fallback.id == baseline_id
+    if (fallback.quality_tier != "frontier" and not fixed_singleton) or not fallback.enabled:
         raise EcoRouteError(
             "The required fallback must be an enabled frontier endpoint",
             code="invalid_fallback",
         )
+    if impact_baseline_id is not None:
+        comparison = await session.get(ModelEndpoint, impact_baseline_id)
+        if comparison is None or comparison.workspace_id != workspace_id or comparison.deleted_at:
+            raise EcoRouteError("Impact baseline endpoint was not found", code="endpoint_not_found")
     policy = await session.get(RoutingPolicy, policy_id)
     if policy is None or policy.workspace_id != workspace_id:
         raise EcoRouteError("Routing policy not found", status_code=404, code="not_found")
@@ -231,6 +237,9 @@ def _logical_model_json(item: LogicalModel, endpoint_ids: list[uuid.UUID]) -> di
         "alias": item.alias,
         "displayName": item.display_name,
         "baselineEndpointId": str(item.baseline_endpoint_id) if item.baseline_endpoint_id else None,
+        "impactBaselineEndpointId": str(
+            item.impact_baseline_endpoint_id or item.baseline_endpoint_id
+        ) if item.baseline_endpoint_id else None,
         "requiredFallbackEndpointId": str(item.required_fallback_endpoint_id)
         if item.required_fallback_endpoint_id
         else None,
@@ -386,6 +395,7 @@ def _endpoint_json(endpoint: ModelEndpoint) -> dict[str, Any]:
         "enabled": endpoint.enabled,
         "healthState": endpoint.health_state,
         "coefficientVersion": endpoint.coefficient_version,
+        "calibration": endpoint.calibration,
         "baselineConcurrency": endpoint.baseline_concurrency,
         "concurrencyTarget": endpoint.concurrency_target,
         "createdAt": endpoint.created_at.isoformat(),
@@ -852,6 +862,7 @@ async def delete_endpoint(
             LogicalModel.deleted_at.is_(None),
             or_(
                 LogicalModel.baseline_endpoint_id == endpoint_id,
+                LogicalModel.impact_baseline_endpoint_id == endpoint_id,
                 LogicalModel.required_fallback_endpoint_id == endpoint_id,
                 LogicalModelEndpoint.endpoint_id == endpoint_id,
             ),
@@ -969,6 +980,9 @@ async def create_logical_model(
     if not endpoint_ids:
         raise EcoRouteError("At least one endpoint is required", code="endpoint_pool_required")
     baseline = _uuid_field(body.get("baselineEndpointId", endpoint_ids[0]), "baselineEndpointId")
+    impact_baseline = _uuid_field(
+        body.get("impactBaselineEndpointId", baseline), "impactBaselineEndpointId"
+    )
     fallback = _uuid_field(
         body.get("requiredFallbackEndpointId", baseline), "requiredFallbackEndpointId"
     )
@@ -982,12 +996,14 @@ async def create_logical_model(
         baseline_id=baseline,
         fallback_id=fallback,
         policy_id=active_policy_id,
+        impact_baseline_id=impact_baseline,
     )
     logical = LogicalModel(
         workspace_id=workspace.id,
         alias=alias,
         display_name=str(body.get("displayName", alias))[:200],
         baseline_endpoint_id=baseline,
+        impact_baseline_endpoint_id=impact_baseline,
         required_fallback_endpoint_id=fallback,
         active_policy_id=active_policy_id,
         enabled=bool(body.get("enabled", True)),
@@ -1048,25 +1064,29 @@ async def patch_logical_model(
             ).all()
         )
     baseline = logical.baseline_endpoint_id
+    impact_baseline = logical.impact_baseline_endpoint_id or baseline
     fallback = logical.required_fallback_endpoint_id
     assert baseline is not None and fallback is not None and logical.active_policy_id is not None
     for external, internal in {
         "displayName": "display_name",
         "enabled": "enabled",
         "baselineEndpointId": "baseline_endpoint_id",
+        "impactBaselineEndpointId": "impact_baseline_endpoint_id",
         "requiredFallbackEndpointId": "required_fallback_endpoint_id",
     }.items():
         if external in body:
             value = body[external]
             if internal.endswith("_id"):
                 value = _uuid_field(value, external)
-                if value not in set(endpoint_ids):
+                if internal != "impact_baseline_endpoint_id" and value not in set(endpoint_ids):
                     raise EcoRouteError(
                         "Baseline and fallback must be in the endpoint pool", code="invalid_pool"
                     )
             setattr(logical, internal, value)
             if internal == "baseline_endpoint_id":
                 baseline = value
+            elif internal == "impact_baseline_endpoint_id":
+                impact_baseline = value
             elif internal == "required_fallback_endpoint_id":
                 fallback = value
     await _validate_logical_references(
@@ -1076,6 +1096,7 @@ async def patch_logical_model(
         baseline_id=baseline,
         fallback_id=fallback,
         policy_id=logical.active_policy_id,
+        impact_baseline_id=impact_baseline,
     )
     if "endpointIds" in body:
         await session.execute(
@@ -3112,10 +3133,15 @@ async def carbon_zones(
         scenario = await _redis_text(redis, "ecoroute:demo:grid", "moderate")
         provider = FixtureCarbonProvider(scenario)
         fixture = [await provider.reading("demo-local"), await provider.reading("demo-remote")]
+    readings_statement = select(CarbonReadingRecord)
+    if not settings.demo_mode:
+        readings_statement = readings_statement.where(
+            CarbonReadingRecord.source.not_like("ecoroute-fixture:%")
+        )
     latest_rows = list(
         (
             await session.scalars(
-                select(CarbonReadingRecord)
+                readings_statement
                 .distinct(CarbonReadingRecord.zone, CarbonReadingRecord.lookup_key)
                 .order_by(
                     CarbonReadingRecord.zone,
@@ -3564,6 +3590,201 @@ async def get_benchmark(
     return _benchmark_json(benchmark)
 
 
+@router.post("/model-endpoints/{endpoint_id}/calibrate")
+async def calibrate_endpoint(
+    endpoint_id: uuid.UUID,
+    body: dict[str, Any],
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    if body.get("confirm") is not True:
+        raise EcoRouteError("Calibration requires confirm=true", code="confirmation_required")
+    endpoint = await session.get(ModelEndpoint, endpoint_id)
+    benchmark = await session.get(
+        Benchmark, _uuid_field(body.get("benchmarkId"), "benchmarkId")
+    )
+    if endpoint is None or benchmark is None:
+        raise EcoRouteError("Endpoint or benchmark not found", status_code=404, code="not_found")
+    optimized = benchmark.optimized_metrics or {}
+    if (
+        benchmark.endpoint_id != endpoint.id
+        or benchmark.agent_id != endpoint.node_agent_id
+        or benchmark.status != "completed"
+        or benchmark.evidence != "measured"
+        or float(optimized.get("error_rate", 1)) != 0
+        or float(optimized.get("quality_score", 0)) < 1
+        or optimized.get("energy_per_request_kwh") is None
+    ):
+        raise EcoRouteError(
+            "Calibration requires a successful measured benchmark for this endpoint",
+            status_code=409,
+            code="invalid_calibration_benchmark",
+        )
+    endpoint.fixed_request_kwh = float(optimized["energy_per_request_kwh"])
+    endpoint.input_kwh_per_1k_tokens = 0
+    endpoint.output_kwh_per_1k_tokens = 0
+    endpoint.energy_evidence = "estimated"
+    endpoint.coefficient_version = f"benchmark:{benchmark.id}"
+    endpoint.calibration = {
+        "benchmarkId": str(benchmark.id),
+        "calibratedAt": utcnow().isoformat(),
+        "model": endpoint.physical_model,
+        "sourceEvidence": "measured",
+        "requestEvidence": "benchmark-calibrated estimate",
+        "optimizedMetrics": optimized,
+        "comparison": benchmark.comparison,
+    }
+    await session.commit()
+    return _endpoint_json(endpoint)
+
+
+@router.post("/demo/hosting-routes/configure")
+async def configure_demo_hosting_routes(
+    body: dict[str, Any], session: AsyncSession = Depends(get_session)
+) -> dict[str, Any]:
+    """Idempotently wire the demo to one hosted SLM and one local Ollama endpoint."""
+    if body.get("confirm") is not True:
+        raise EcoRouteError("Configuration requires confirm=true", code="confirmation_required")
+    if not settings.freesolo_support_base_url or not settings.freesolo_support_model_id:
+        raise EcoRouteError(
+            "FREESOLO_SUPPORT_BASE_URL and FREESOLO_SUPPORT_MODEL_ID are required",
+            status_code=503,
+            code="freesolo_support_unconfigured",
+        )
+    workspace = await _workspace(session)
+    support_profile = await session.scalar(
+        select(SlmProfile).where(
+            SlmProfile.workspace_id == workspace.id,
+            SlmProfile.business_name == "Northstar Outfitters",
+            SlmProfile.deleted_at.is_(None),
+        )
+    )
+    ollama = await session.scalar(
+        select(ModelEndpoint).where(
+            ModelEndpoint.workspace_id == workspace.id,
+            ModelEndpoint.name == "kernel-lab-cpu",
+            ModelEndpoint.deleted_at.is_(None),
+        )
+    )
+    if ollama is None:
+        raise EcoRouteError("Kernel-lab Ollama endpoint is unavailable", status_code=503)
+    ollama_health = await providers.for_provider(ollama.provider).health(ollama)
+    ollama.health_state = str(ollama_health.get("status", "unhealthy"))
+    if ollama.health_state != "healthy":
+        raise EcoRouteError("Kernel-lab Ollama endpoint is unhealthy", status_code=503)
+    ollama.capabilities = sorted(set(ollama.capabilities) | {"text", "streaming"})
+    cloud = await session.scalar(
+        select(ModelEndpoint).where(
+            ModelEndpoint.workspace_id == workspace.id,
+            ModelEndpoint.name == "support-cloud-freesolo",
+            ModelEndpoint.deleted_at.is_(None),
+        )
+    )
+    if cloud is None:
+        cloud = ModelEndpoint(
+            workspace_id=workspace.id,
+            name="support-cloud-freesolo",
+            provider="freesolo",
+            base_url=settings.freesolo_support_base_url.rstrip("/"),
+            credential_ref="env:FREESOLO_API_KEY",
+            physical_model=settings.freesolo_support_model_id,
+            region="cloud-hosted",
+            grid_zone="cloud-hosted-unknown",
+            processing_location_evidence="operator_declared",
+            grid_attribution="unknown",
+            quality_tier="standard",
+            capabilities=["text", "streaming"],
+            context_window_tokens=32768,
+            input_usd_per_million_tokens=0.10,
+            output_usd_per_million_tokens=0.30,
+            fixed_request_kwh=0.00004,
+            input_kwh_per_1k_tokens=0.00010,
+            output_kwh_per_1k_tokens=0.00030,
+            energy_evidence="estimated",
+            latency_p50_ms=250,
+            latency_p95_ms=1200,
+            self_hosted=False,
+            slm_profile_id=support_profile.id if support_profile else None,
+            health_state="unknown",
+            coefficient_version="provider-estimate-v1",
+        )
+        session.add(cloud)
+        await session.flush()
+    else:
+        cloud.base_url = settings.freesolo_support_base_url.rstrip("/")
+        cloud.physical_model = settings.freesolo_support_model_id
+        cloud.credential_ref = "env:FREESOLO_API_KEY"
+        cloud.enabled = True
+        cloud.quality_tier = "standard"
+        cloud.slm_profile_id = support_profile.id if support_profile else None
+        cloud.processing_location_evidence = "operator_declared"
+
+    configured: dict[str, str] = {}
+    for alias, endpoint, impact_baseline in (
+        ("support-cloud", cloud, cloud),
+        ("support-self-hosted", ollama, cloud),
+    ):
+        policy = await session.scalar(
+            select(RoutingPolicy).where(
+                RoutingPolicy.workspace_id == workspace.id,
+                RoutingPolicy.name == f"Fixed route: {alias}",
+            )
+        )
+        config = RoutingPolicyConfig(
+            name=f"Fixed route: {alias}",
+            preset="balanced",
+            enabled_endpoint_ids=[endpoint.id],
+            semantic_cache_enabled=False,
+            quality_fallback_enabled=False,
+        )
+        if policy is None:
+            policy = RoutingPolicy(
+                workspace_id=workspace.id,
+                family_id=uuid7(),
+                version_number=1,
+                name=config.name,
+                preset=config.preset,
+                config=config.model_dump(mode="json"),
+                created_by="kernel-lab-setup",
+            )
+            session.add(policy)
+            await session.flush()
+        else:
+            policy.config = config.model_dump(mode="json")
+        logical = await session.scalar(
+            select(LogicalModel).where(
+                LogicalModel.workspace_id == workspace.id,
+                LogicalModel.alias == alias,
+                LogicalModel.deleted_at.is_(None),
+            )
+        )
+        if logical is None:
+            logical = LogicalModel(
+                workspace_id=workspace.id,
+                alias=alias,
+                display_name="Cloud Support SLM" if alias == "support-cloud" else "Self-hosted EcoRoute VM",
+                baseline_endpoint_id=endpoint.id,
+                impact_baseline_endpoint_id=impact_baseline.id,
+                required_fallback_endpoint_id=endpoint.id,
+                active_policy_id=policy.id,
+                enabled=True,
+            )
+            session.add(logical)
+            await session.flush()
+        else:
+            logical.baseline_endpoint_id = endpoint.id
+            logical.impact_baseline_endpoint_id = impact_baseline.id
+            logical.required_fallback_endpoint_id = endpoint.id
+            logical.active_policy_id = policy.id
+            logical.enabled = True
+        await session.execute(
+            delete(LogicalModelEndpoint).where(LogicalModelEndpoint.logical_model_id == logical.id)
+        )
+        session.add(LogicalModelEndpoint(logical_model_id=logical.id, endpoint_id=endpoint.id, priority=10))
+        configured[alias] = str(logical.id)
+    await session.commit()
+    return {"configured": configured, "cloudEndpointId": str(cloud.id), "selfHostedEndpointId": str(ollama.id)}
+
+
 @router.post("/benchmarks/{benchmark_id}/cancel", status_code=202)
 async def cancel_benchmark(
     benchmark_id: uuid.UUID,
@@ -3734,17 +3955,81 @@ async def report_summary(
     )
     impacts = [impact for _, _, impact in rows if impact is not None]
     carbon_impacts = [impact for impact in impacts if impact.carbon_accounting_available]
+    actual_carbon_impacts = [
+        impact
+        for impact in impacts
+        if impact.carbon_accounting_available
+        or impact.evidence.get("selected_carbon_available") is True
+    ]
+    baseline_carbon_impacts = [
+        impact
+        for impact in impacts
+        if impact.carbon_accounting_available
+        or impact.evidence.get("baseline_carbon_available") is True
+    ]
     evidence_counts = {"measured": 0, "estimated": 0, "stale": 0, "simulated": 0}
     for impact in carbon_impacts:
         level = str(impact.evidence.get("carbon_level", "estimated"))
         evidence_counts[level] = evidence_counts.get(level, 0) + 1
-    baseline_carbon = sum(item.baseline_carbon_g for item in carbon_impacts)
-    actual_carbon = sum(item.actual_carbon_g for item in carbon_impacts)
+    baseline_carbon = sum(item.baseline_carbon_g for item in baseline_carbon_impacts)
+    actual_carbon = sum(item.actual_carbon_g for item in actual_carbon_impacts)
     baseline_energy = sum(item.baseline_energy_kwh for item in impacts)
     actual_energy = sum(item.actual_energy_kwh for item in impacts)
     baseline_cost = sum(float(item.baseline_cost_usd) for item in impacts)
     actual_cost = sum(float(item.actual_cost_usd) for item in impacts)
     durations = [item.duration_ms for item, _, _ in rows if item.duration_ms is not None]
+    hosting_comparison: dict[str, Any] = {}
+    for alias, mode in (("support-cloud", "regular"), ("support-self-hosted", "self_hosted")):
+        selected_rows = [value for value in rows if value[0].requested_model_alias == alias]
+        selected_impacts = [value[2] for value in selected_rows if value[2] is not None]
+        selected_durations = sorted(
+            value[0].duration_ms for value in selected_rows if value[0].duration_ms is not None
+        )
+        p95_index = max(0, min(len(selected_durations) - 1, int(len(selected_durations) * 0.95)))
+        energy = sum(value.actual_energy_kwh for value in selected_impacts)
+        baseline_host_energy = sum(value.baseline_energy_kwh for value in selected_impacts)
+        provider_cost = sum(float(value.actual_cost_usd) for value in selected_impacts)
+        actual_cost = (
+            energy * settings.electricity_usd_per_kwh if mode == "self_hosted" else provider_cost
+        )
+        baseline_host_cost = sum(float(value.baseline_cost_usd) for value in selected_impacts)
+        carbon_values = [value for value in selected_impacts if value.carbon_accounting_available]
+        actual_carbon_values = [
+            value
+            for value in selected_impacts
+            if value.carbon_accounting_available
+            or value.evidence.get("selected_carbon_available") is True
+        ]
+        hosting_comparison[mode] = {
+            "logicalModel": alias,
+            "requests": len(selected_rows),
+            "successfulRequests": sum(value[0].status == "completed" for value in selected_rows),
+            "successRate": (
+                sum(value[0].status == "completed" for value in selected_rows) / len(selected_rows)
+                if selected_rows else 1.0
+            ),
+            "averageLatencyMs": (
+                sum(selected_durations) / len(selected_durations) if selected_durations else 0
+            ),
+            "p95LatencyMs": selected_durations[p95_index] if selected_durations else 0,
+            "actualEnergyKwh": energy,
+            "avoidedEnergyKwh": max(0.0, baseline_host_energy - energy),
+            "actualCarbonGrams": sum(value.actual_carbon_g for value in actual_carbon_values)
+            if actual_carbon_values else None,
+            "avoidedCarbonGrams": sum(max(0, value.raw_carbon_delta_g) for value in carbon_values)
+            if carbon_values else None,
+            "actualCostUsd": actual_cost,
+            "costSavingsUsd": max(0.0, baseline_host_cost - actual_cost),
+            "evidence": (
+                "benchmark-calibrated estimate" if mode == "self_hosted" else "provider estimate"
+            ),
+        }
+    latest_measured_benchmark = await session.scalar(
+        select(Benchmark)
+        .where(Benchmark.status == "completed", Benchmark.evidence == "measured")
+        .order_by(Benchmark.completed_at.desc())
+        .limit(1)
+    )
     return {
         "generatedAt": utcnow().isoformat(),
         "filters": _report_filter_metadata(
@@ -3754,8 +4039,8 @@ async def report_summary(
         "successfulRequests": sum(item.status == "completed" for item, _, _ in rows),
         "qualityFallbacks": sum(item.fallback_used for item, _, _ in rows),
         "averageLatencyMs": sum(durations) / len(durations) if durations else 0,
-        "baselineCarbonGrams": baseline_carbon if carbon_impacts else None,
-        "actualCarbonGrams": actual_carbon if carbon_impacts else None,
+        "baselineCarbonGrams": baseline_carbon if baseline_carbon_impacts else None,
+        "actualCarbonGrams": actual_carbon if actual_carbon_impacts else None,
         "rawCarbonDeltaGrams": baseline_carbon - actual_carbon if carbon_impacts else None,
         "avoidedCarbonGrams": (
             sum(max(0, item.raw_carbon_delta_g) for item in carbon_impacts)
@@ -3780,6 +4065,10 @@ async def report_summary(
         "operationalCarbonIntensityLabel": "Operational carbon intensity",
         "methodologyVersion": "ecoroute-v2",
         "boundary": "Operational inference energy and carbon; embodied carbon excluded.",
+        "hostingComparison": hosting_comparison,
+        "latestMeasuredBenchmark": _benchmark_json(latest_measured_benchmark)
+        if latest_measured_benchmark else None,
+        "electricityUsdPerKwh": settings.electricity_usd_per_kwh,
     }
 
 

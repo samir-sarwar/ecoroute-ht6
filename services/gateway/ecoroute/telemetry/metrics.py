@@ -21,6 +21,11 @@ AVOIDED_CARBON = Counter(
     "ecoroute_avoided_carbon_grams_total", "Avoided carbon", ["strategy", "evidence"]
 )
 ROUTER_DURATION = Histogram("ecoroute_router_duration_seconds", "Router duration")
+ROUTER_CLASSIFICATIONS = Counter(
+    "ecoroute_router_classifications_total",
+    "Router classifications by execution source and outcome",
+    ["source", "complexity", "risk", "rationale"],
+)
 QUALITY_FALLBACKS = Counter("ecoroute_quality_fallbacks_total", "Quality fallbacks", ["reason"])
 CACHE_HITS = Counter("ecoroute_cache_hits_total", "Cache hits", ["kind"])
 GRID_INTENSITY = Gauge(

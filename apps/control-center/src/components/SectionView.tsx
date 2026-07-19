@@ -4138,12 +4138,32 @@ function AuditView() {
 function ReportsView() {
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
+  const [reportWindow, setReportWindow] = useState<"session" | "cumulative" | "custom">("session");
   const [evidenceFilter, setEvidenceFilter] = useState("");
   const [routeFilter, setRouteFilter] = useState("");
   const [logicalModelId, setLogicalModelId] = useState("");
   const [endpointId, setEndpointId] = useState("");
   const [exporting, setExporting] = useState(false);
   const [exportError, setExportError] = useState<Error | null>(null);
+  const sessionStart = useRef("");
+  useEffect(() => {
+    let startedAt = sessionStorage.getItem("ecoroute-impact-session-start");
+    if (!startedAt) {
+      startedAt = new Date().toISOString();
+      sessionStorage.setItem("ecoroute-impact-session-start", startedAt);
+    }
+    sessionStart.current = startedAt;
+    setFrom(startedAt.slice(0, 16));
+  }, []);
+
+  function selectReportWindow(value: "session" | "cumulative" | "custom") {
+    setReportWindow(value);
+    if (value === "session") setFrom(sessionStart.current.slice(0, 16));
+    if (value === "cumulative") {
+      setFrom("");
+      setTo("");
+    }
+  }
   const logicalModels = useQuery({
     queryKey: ["logical-models"],
     queryFn: () => api<List>("/logical-models"),
@@ -4173,6 +4193,7 @@ function ReportsView() {
     queryKey: ["report-summary", queryString],
     queryFn: () =>
       api<Item>(`/reports/summary${queryString ? `?${queryString}` : ""}`),
+    refetchInterval: 2500,
   });
   async function downloadImpact() {
     setExporting(true);
@@ -4203,7 +4224,13 @@ function ReportsView() {
   const carbonAvailable = Boolean(
     summary.data && summary.data.carbonOutcome !== "unavailable",
   );
+  const baselineCarbonAvailable = summary.data?.baselineCarbonGrams != null;
+  const actualCarbonAvailable = summary.data?.actualCarbonGrams != null;
   const evidenceCounts = summary.data?.evidenceCounts ?? {};
+  const hosting = summary.data?.hostingComparison ?? {};
+  const cloud = hosting.regular ?? {};
+  const selfHosted = hosting.self_hosted ?? {};
+  const benchmark = summary.data?.latestMeasuredBenchmark;
   return (
     <div className="page">
       <Header
@@ -4222,18 +4249,34 @@ function ReportsView() {
         retry={() => summary.refetch()}
       />
       <div className="filter-bar">
+        <Field label="Report window">
+          <select
+            value={reportWindow}
+            onChange={(event) => selectReportWindow(event.target.value as "session" | "cumulative" | "custom")}
+          >
+            <option value="session">Current demo session</option>
+            <option value="cumulative">Cumulative history</option>
+            <option value="custom">Custom UTC range</option>
+          </select>
+        </Field>
         <Field label="UTC start">
           <input
             type="datetime-local"
             value={from}
-            onChange={(event) => setFrom(event.target.value)}
+            onChange={(event) => {
+              setFrom(event.target.value);
+              setReportWindow("custom");
+            }}
           />
         </Field>
         <Field label="UTC end">
           <input
             type="datetime-local"
             value={to}
-            onChange={(event) => setTo(event.target.value)}
+            onChange={(event) => {
+              setTo(event.target.value);
+              setReportWindow("custom");
+            }}
           />
         </Field>
         <Field label="Evidence">
@@ -4299,12 +4342,12 @@ function ReportsView() {
       <div className="metric-grid">
         <div className="metric">
           <span>Baseline carbon</span>
-          <strong>{carbonAvailable ? `${baseline.toFixed(3)} g` : "Unavailable"}</strong>
+          <strong>{baselineCarbonAvailable ? `${baseline.toFixed(3)} g` : "Unavailable"}</strong>
           <small>configured baseline endpoints</small>
         </div>
         <div className="metric">
           <span>Actual carbon</span>
-          <strong>{carbonAvailable ? `${actual.toFixed(3)} g` : "Unavailable"}</strong>
+          <strong>{actualCarbonAvailable ? `${actual.toFixed(3)} g` : "Unavailable"}</strong>
           <small>operational attribution</small>
         </div>
         <div className="metric">
@@ -4338,6 +4381,29 @@ function ReportsView() {
           </small>
         </div>
       </div>
+      <section className="panel report-chart">
+        <div className="panel-heading">
+          <div>
+            <h2>Cloud host vs EcoRoute self-hosted VM</h2>
+            <p>Live request totals · refreshes every 2.5 seconds</p>
+          </div>
+          <span className="evidence estimated">benchmark-calibrated estimate</span>
+        </div>
+        <div className="metric-grid">
+          <div className="metric"><span>Requests</span><strong>{selfHosted.requests ?? 0} self / {cloud.requests ?? 0} cloud</strong><small>{Number(selfHosted.successRate ?? 1).toLocaleString(undefined, { style: "percent", maximumFractionDigits: 1 })} self-host success</small></div>
+          <div className="metric"><span>Average latency</span><strong>{Number(selfHosted.averageLatencyMs ?? 0).toFixed(0)} ms</strong><small>cloud {Number(cloud.averageLatencyMs ?? 0).toFixed(0)} ms</small></div>
+          <div className="metric"><span>P95 latency</span><strong>{Number(selfHosted.p95LatencyMs ?? 0).toFixed(0)} ms</strong><small>cloud {Number(cloud.p95LatencyMs ?? 0).toFixed(0)} ms</small></div>
+          <div className="metric"><span>Energy avoided</span><strong>{Number(selfHosted.avoidedEnergyKwh ?? 0).toExponential(3)} kWh</strong><small>{selfHosted.evidence ?? "unavailable"}</small></div>
+          <div className="metric"><span>Self-host carbon</span><strong>{selfHosted.actualCarbonGrams == null ? "Unavailable" : `${Number(selfHosted.actualCarbonGrams).toFixed(4)} g`}</strong><small>Electricity Maps CA-ON + calibrated energy</small></div>
+          <div className="metric"><span>Carbon avoided</span><strong>{selfHosted.avoidedCarbonGrams == null ? "Unavailable" : `${Number(selfHosted.avoidedCarbonGrams).toFixed(4)} g`}</strong><small>requires attributable cloud region</small></div>
+          <div className="metric"><span>Cost savings</span><strong>${Number(selfHosted.costSavingsUsd ?? 0).toFixed(6)}</strong><small>local tariff ${Number(summary.data?.electricityUsdPerKwh ?? 0).toFixed(3)}/kWh</small></div>
+        </div>
+        <div className="comparison-bars">
+          <div><span>Cloud energy</span><i style={{ width: "100%" }} /><strong>{Number(cloud.actualEnergyKwh ?? 0).toExponential(3)} kWh</strong></div>
+          <div><span>Self-host energy</span><i className="actual" style={{ width: `${cloud.actualEnergyKwh ? Math.min(100, Number(selfHosted.actualEnergyKwh ?? 0) / Number(cloud.actualEnergyKwh) * 100) : 0}%` }} /><strong>{Number(selfHosted.actualEnergyKwh ?? 0).toExponential(3)} kWh</strong></div>
+        </div>
+        {benchmark ? <div className="evidence-summary"><span>Measured benchmark</span><span>Energy/request {benchmark.comparison?.energyPerRequestChangePct ?? "—"}%</span><span>Throughput +{benchmark.comparison?.throughputChangePct ?? "—"}%</span><span>P95 {benchmark.comparison?.p95LatencyChangePct ?? "—"}%</span><span>{benchmark.completedAt ? formatUtc(benchmark.completedAt) : ""}</span></div> : null}
+      </section>
       <div className="overview-grid">
         <section className="panel report-chart">
           <div className="panel-heading">
@@ -4352,9 +4418,9 @@ function ReportsView() {
           <div className="comparison-bars">
             <div>
               <span>Baseline</span>
-              <i style={{ width: carbonAvailable ? "100%" : "0%" }} />
+              <i style={{ width: baselineCarbonAvailable ? "100%" : "0%" }} />
               <strong>
-                {carbonAvailable ? `${baseline.toFixed(3)} g` : "Unavailable"}
+                {baselineCarbonAvailable ? `${baseline.toFixed(3)} g` : "Unavailable"}
               </strong>
             </div>
             <div>
@@ -4362,11 +4428,11 @@ function ReportsView() {
               <i
                 className="actual"
                 style={{
-                  width: `${carbonAvailable && baseline ? Math.min(100, (actual / baseline) * 100) : 0}%`,
+                  width: `${actualCarbonAvailable && baselineCarbonAvailable && baseline ? Math.min(100, (actual / baseline) * 100) : actualCarbonAvailable ? 100 : 0}%`,
                 }}
               />
               <strong>
-                {carbonAvailable ? `${actual.toFixed(3)} g` : "Unavailable"}
+                {actualCarbonAvailable ? `${actual.toFixed(3)} g` : "Unavailable"}
               </strong>
             </div>
           </div>

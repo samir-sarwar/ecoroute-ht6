@@ -135,6 +135,9 @@ class RouterClassification(BaseModel):
     predicted_output_tokens: int = Field(ge=1, le=4096)
     confidence: float = Field(ge=0, le=1)
     rationale_code: str = Field(pattern=r"^[A-Z][A-Z0-9_]{0,63}$")
+    classification_source: Literal["deterministic", "trained_adapter", "fail_closed"] = (
+        "deterministic"
+    )
 
     @classmethod
     def fail_closed(cls, rationale: str = "ROUTER_UNAVAILABLE") -> RouterClassification:
@@ -148,6 +151,7 @@ class RouterClassification(BaseModel):
             predicted_output_tokens=256,
             confidence=0.0,
             rationale_code=rationale,
+            classification_source="fail_closed",
         )
 
 

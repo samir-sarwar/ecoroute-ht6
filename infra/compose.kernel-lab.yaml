@@ -9,5 +9,12 @@ services:
       args:
         PRELOAD_EMBEDDING_MODEL: "false"
 
+  # The periodic health checks run in the worker. Linux does not create
+  # host.docker.internal automatically, so give it the same host route used
+  # by the gateway to reach Ollama in WSL.
+  worker:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
   agent-simulator:
     profiles: ["simulator"]

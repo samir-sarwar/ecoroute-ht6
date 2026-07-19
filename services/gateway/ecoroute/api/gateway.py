@@ -4,6 +4,7 @@ import asyncio
 import json
 import time
 import uuid
+from dataclasses import replace
 from decimal import Decimal
 from typing import Any
 
@@ -172,6 +173,13 @@ def _impact_evidence(
         "carbon_level": carbon_level,
         "energy_source": selected_endpoint.name + ":" + selected_endpoint.coefficient_version,
         "coefficient_version": selected_endpoint.coefficient_version,
+        "hosting_mode": "self_hosted" if selected_endpoint.self_hosted else "regular",
+        "calibration": selected_endpoint.calibration,
+        "request_energy_evidence": (
+            selected_endpoint.calibration.get("requestEvidence")
+            if selected_endpoint.calibration
+            else selected.energy_evidence
+        ),
         "carbon_source": selected_reading.source,
         "carbon_observed_at": selected_reading.observed_at.isoformat(),
         "carbon_metadata": selected_reading.metadata,
@@ -190,6 +198,8 @@ def _impact_evidence(
         "baseline_azure_deployment_type": baseline_endpoint.azure_deployment_type,
         "baseline_processing_location_evidence": baseline_endpoint.processing_location_evidence,
         "baseline_grid_attribution": baseline_endpoint.grid_attribution,
+        "selected_carbon_available": selected.carbon_available,
+        "baseline_carbon_available": baseline.carbon_available,
         "carbon_accounting_available": baseline.carbon_available and selected.carbon_available,
         "attribution_method": "endpoint_coefficients_times_region_grid_intensity",
         "claim_scope": _claim_scope(selected_endpoint),
@@ -614,6 +624,12 @@ async def chat_completions(
     if classification.confidence < policy.min_router_confidence:
         classification = RouterClassification.fail_closed("ROUTER_BELOW_POLICY_CONFIDENCE")
     metrics.ROUTER_DURATION.observe(time.monotonic() - router_started)
+    metrics.ROUTER_CLASSIFICATIONS.labels(
+        classification.classification_source,
+        classification.complexity,
+        classification.risk,
+        classification.rationale_code,
+    ).inc()
     row.router_classification = classification.model_dump(mode="json")
     scenario = await _redis_text(redis, "ecoroute:demo:grid", "moderate")
     carbon_service = CarbonService(settings, redis)
@@ -648,8 +664,36 @@ async def chat_completions(
         )
         for endpoint in endpoint_rows
     ]
+    # FreeSOLO's serving endpoint supports chat completions but does not expose
+    # the optional OpenAI /models probe. The fixed cloud route therefore tests
+    # availability by making the real request instead of excluding it up front.
+    if logical.alias == "support-cloud" and len(candidates) == 1:
+        candidates = [replace(candidates[0], health_state="healthy")]
     baseline = next(item for item in candidates if item.id == logical.baseline_endpoint_id)
     baseline_row = next(item for item in endpoint_rows if item.id == baseline.id)
+    accounting_baseline = baseline
+    accounting_baseline_row = baseline_row
+    accounting_baseline_reading = readings[baseline.id]
+    impact_baseline_id = logical.impact_baseline_endpoint_id
+    if impact_baseline_id is not None and impact_baseline_id != baseline.id:
+        comparison_row = await session.get(ModelEndpoint, impact_baseline_id)
+        if comparison_row is not None and comparison_row.deleted_at is None:
+            comparison_reading = await carbon_service.reading(
+                session,
+                comparison_row.grid_zone,
+                demo_scenario=scenario if settings.demo_mode else None,
+                allow_stale_minutes=policy.allow_stale_carbon_minutes,
+                **_carbon_lookup(comparison_row),
+            )
+            accounting_baseline = _candidate(
+                comparison_row,
+                comparison_reading,
+                profiles.get(comparison_row.slm_profile_id)
+                if comparison_row.slm_profile_id
+                else None,
+            )
+            accounting_baseline_row = comparison_row
+            accounting_baseline_reading = comparison_reading
     assert logical.required_fallback_endpoint_id is not None
     try:
         selected, snapshots, selection_reason = select_candidate(
@@ -907,12 +951,12 @@ async def chat_completions(
             input_tokens = int(usage.get("prompt_tokens", features.input_token_estimate))
             output_tokens = int(usage.get("completion_tokens", max(1, len(content) // 4)))
             impact = calculate_impact(
-                baseline,
+                accounting_baseline,
                 stream_selected,
                 input_tokens,
                 output_tokens,
                 router_energy_kwh=0.000002,
-                baseline_carbon_available=baseline.carbon_available,
+                baseline_carbon_available=accounting_baseline.carbon_available,
                 selected_carbon_available=stream_selected.carbon_available,
             )
             completion = {
@@ -965,9 +1009,9 @@ async def chat_completions(
                         actual_cost_usd=impact.actual_cost_usd,
                         carbon_accounting_available=impact.carbon_accounting_available,
                         evidence=_impact_evidence(
-                            baseline,
-                            baseline_row,
-                            readings[baseline.id],
+                            accounting_baseline,
+                            accounting_baseline_row,
+                            accounting_baseline_reading,
                             stream_selected,
                             stream_selected_row,
                             readings[stream_selected.id],
@@ -1374,12 +1418,12 @@ async def chat_completions(
     input_tokens = int(usage.get("prompt_tokens", features.input_token_estimate))
     output_tokens = int(usage.get("completion_tokens", max(1, len(str(completion)) // 4)))
     impact = calculate_impact(
-        baseline,
+        accounting_baseline,
         selected,
         input_tokens,
         output_tokens,
         router_energy_kwh=0.000002,
-        baseline_carbon_available=baseline.carbon_available,
+        baseline_carbon_available=accounting_baseline.carbon_available,
         selected_carbon_available=selected.carbon_available,
     )
     row.status = "completed"
@@ -1399,9 +1443,9 @@ async def chat_completions(
             actual_cost_usd=impact.actual_cost_usd,
             carbon_accounting_available=impact.carbon_accounting_available,
             evidence=_impact_evidence(
-                baseline,
-                baseline_row,
-                readings[baseline.id],
+                accounting_baseline,
+                accounting_baseline_row,
+                accounting_baseline_reading,
                 selected,
                 selected_row,
                 readings[selected.id],
