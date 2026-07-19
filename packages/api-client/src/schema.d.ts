@@ -1202,7 +1202,7 @@ export interface components {
             /** Physicalmodel */
             physicalModel: string;
             /** Azuredeploymenttype */
-            azureDeploymentType?: ("standard" | "provisioned_managed") | null;
+            azureDeploymentType?: ("standard" | "provisioned_managed" | "global_standard") | null;
             /** Region */
             region: string;
             /** Gridzone */

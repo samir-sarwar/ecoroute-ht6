@@ -41,11 +41,17 @@ provider as unconfigured. To use an independently deployed Carbon Aware service 
 `ECOROUTE_CARBON_PROVIDER=carbon_aware` and `CARBON_AWARE_BASE_URL`; Carbon Aware supports direct
 zone lookup but not EcoRoute's Electricity Maps data-center lookup mode.
 
-## Register Azure OpenAI regional endpoints
+## Register Azure OpenAI endpoints
+
+Global Standard deployments can be registered for real completions, cost accounting, and
+coefficient-based energy estimates. Because Azure may process a Global request in any supported
+region, register it with `region=global`, `gridZone=unknown`, and `gridAttribution=unknown`. It is
+then excluded from carbon totals and cannot be used to prove a clean/dirty regional route.
 
 Create the same model deployment in at least two Azure OpenAI resources/regions. The deployment
-must use `Standard` or the regional form of `Provisioned Managed`; Global and Data Zone deployment
-types are deliberately rejected because they do not prove one exact processing region. Azure
+must use `Standard` or the regional form of `Provisioned Managed` to participate in regional
+carbon routing. Data Zone deployments are currently rejected because they do not prove one exact
+processing region. Azure
 documents the [regional data-processing behavior](https://learn.microsoft.com/en-us/azure/foundry/foundry-models/concepts/models-sold-directly-by-azure-region-availability)
 and its [OpenAI v1 endpoint format](https://learn.microsoft.com/en-us/azure/foundry/foundry-models/concepts/endpoints).
 

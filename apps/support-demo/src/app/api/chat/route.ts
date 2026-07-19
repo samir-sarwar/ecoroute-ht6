@@ -2,13 +2,16 @@ import { NextRequest } from "next/server";
 
 const gateway = process.env.ECOROUTE_GATEWAY_INTERNAL_URL ?? "http://localhost:8000";
 const key = process.env.ECOROUTE_SUPPORT_DEMO_GATEWAY_KEY ?? "ecoroute-demo-key";
-const systemPrompt = `You are the customer support assistant for the fictional retailer Northstar Outfitters.
-Use these fictional policies only: unused items may be returned within 30 days; final-sale items
-cannot be returned unless defective; exchanges depend on stock; standard shipping is 3–5 business
-days; escalate shipments with no carrier movement after 7 business days; approved refunds may take
-5–10 business days. Be clear, calm, concise, and never claim that you performed an account action.
-For legal, payment, authentication, medical, financial, or safety-critical requests, recommend a
-qualified human. This prompt is version northstar-support-v1.`;
+const systemPrompt = `You are the Northstar Outfitters policy assistant.
+Use only the fictional policy facts below. Return exactly one JSON object with answer,
+confidence, policy_ids, and needs_human. Never claim that you performed a customer record change.
+
+exchange-stock: Exchanges depend on current inventory.
+final-sale: Final-sale items cannot be returned except when defective.
+refund-timing: Approved refunds may take 5-10 business days to appear.
+returns-30-day: Unused items may be returned within 30 days.
+shipping-delay: Escalate after 7 business days without carrier movement.
+shipping-standard: Standard shipping estimate is 3-5 business days.`;
 
 type TranscriptMessage = { role: "user" | "assistant"; content: string };
 type RequestBody = {

@@ -1168,13 +1168,16 @@ function EndpointsView() {
             </Field>
             <Field
               label="Azure deployment type"
-              hint="Required for Azure. Global and Data Zone deployments are intentionally excluded."
+              hint="Global Standard works for live calls, but cannot support region-specific carbon accounting."
             >
               <select name="azureDeploymentType" defaultValue="">
                 <option value="">Not Azure</option>
                 <option value="standard">Standard (regional)</option>
                 <option value="provisioned_managed">
                   Provisioned Managed (regional)
+                </option>
+                <option value="global_standard">
+                  Global Standard (location not attributable)
                 </option>
               </select>
             </Field>
@@ -1565,7 +1568,7 @@ function EndpointsView() {
             </Field>
             <Field
               label="Azure deployment type"
-              hint="Only single-region Standard or Provisioned Managed deployments qualify."
+              hint="Global Standard works for live calls, but cannot support region-specific carbon accounting."
             >
               <select
                 name="azureDeploymentType"
@@ -1575,6 +1578,9 @@ function EndpointsView() {
                 <option value="standard">Standard (regional)</option>
                 <option value="provisioned_managed">
                   Provisioned Managed (regional)
+                </option>
+                <option value="global_standard">
+                  Global Standard (location not attributable)
                 </option>
               </select>
             </Field>
@@ -4060,6 +4066,41 @@ function AuditView() {
               </section>
               <section>
                 <h3>2 · Candidate selection</h3>
+                {detail.data.routeDecision?.demoRegionRecommendation ? (
+                  <div className="notice info">
+                    <strong>
+                      Demo green target: {detail.data.routeDecision.demoRegionRecommendation.target.region}
+                    </strong>
+                    <span>
+                      {detail.data.routeDecision.demoRegionRecommendation.target.zone} ·{" "}
+                      {detail.data.routeDecision.demoRegionRecommendation.target.intensityGco2Kwh}{" "}
+                      gCO₂e/kWh from a live scan. This is counterfactual; Azure Global Standard
+                      controls the actual processing region.
+                    </span>
+                  </div>
+                ) : null}
+                {detail.data.selectedEndpointDetails ? (
+                  <div className="model-parameter-map">
+                    <div>
+                      <span>Client model parameter</span>
+                      <code>model: {detail.data.logicalModel}</code>
+                    </div>
+                    <Route aria-hidden="true" />
+                    <div>
+                      <span>Provider model parameter</span>
+                      <code>
+                        {detail.data.cache === "exact" || detail.data.cache === "semantic"
+                          ? "No upstream call"
+                          : `model: ${detail.data.selectedEndpointDetails.physicalModel}`}
+                      </code>
+                      <small>
+                        {detail.data.selectedEndpointDetails.name} ·{" "}
+                        {detail.data.selectedEndpointDetails.provider} ·{" "}
+                        {detail.data.selectedEndpointDetails.region}
+                      </small>
+                    </div>
+                  </div>
+                ) : null}
                 {detail.data.routeDecision?.candidates?.map(
                   (candidate: Item) => {
                     const carbon =
@@ -4071,6 +4112,9 @@ function AuditView() {
                       key={candidate.endpoint_id ?? candidate.endpointId}
                     >
                       <strong>{candidate.name}</strong>
+                      <code>
+                        {candidate.endpoint?.physicalModel ?? "model unavailable"}
+                      </code>
                       <span>
                         {candidate.excluded_reason ??
                           candidate.excludedReason ??
@@ -4080,6 +4124,11 @@ function AuditView() {
                         {carbon == null ? "carbon unavailable" : `${carbon} g`} · $
                         {candidate.estimated_cost_usd ??
                           candidate.estimatedCostUsd}
+                      </small>
+                      <small>
+                        {candidate.endpoint?.provider ?? candidate.provider} ·{" "}
+                        {candidate.endpoint?.region ?? candidate.region} ·{" "}
+                        {candidate.endpoint?.qualityTier ?? candidate.quality_tier}
                       </small>
                     </div>
                     );
@@ -4091,11 +4140,15 @@ function AuditView() {
                 {detail.data.attempts?.map((attempt: Item) => (
                   <div className="timeline-row" key={attempt.number}>
                     <strong>
-                      Attempt {attempt.number} · {attempt.purpose}
+                      Attempt {attempt.number} · {attempt.purpose} ·{" "}
+                      {attempt.endpoint?.name ?? attempt.endpointId}
                     </strong>
                     <span>
                       {attempt.status} · {attempt.durationMs} ms
                     </span>
+                    <code>
+                      model: {attempt.endpoint?.physicalModel ?? "unavailable"}
+                    </code>
                     <small>{attempt.qualityVerdict?.reason}</small>
                   </div>
                 ))}
@@ -4110,11 +4163,26 @@ function AuditView() {
                     <dd>
                       {value.carbonAccountingAvailable
                         ? `${value.baselineCarbonG} → ${value.actualCarbonG} g`
+                        : value.demoCounterfactual
+                          ? `${value.demoCounterfactual.baselineCarbonG} → ${value.demoCounterfactual.targetCarbonG} g (demo counterfactual)`
                         : "Unavailable — grid/location evidence was insufficient"}
                     </dd>
+                    {value.demoCounterfactual ? (
+                      <>
+                        <dt>Reference → demo target</dt>
+                        <dd>
+                          {value.demoCounterfactual.reference.region} ({value.demoCounterfactual.reference.zone}) →{" "}
+                          {value.demoCounterfactual.target.region} ({value.demoCounterfactual.target.zone})
+                        </dd>
+                      </>
+                    ) : null}
                     <dt>Energy</dt>
                     <dd>
                       {value.baselineEnergyKwh} → {value.actualEnergyKwh} kWh
+                    </dd>
+                    <dt>Estimated cost</dt>
+                    <dd>
+                      ${value.baselineCostUsd} → ${value.actualCostUsd}
                     </dd>
                     <dt>Evidence</dt>
                     <dd>{JSON.stringify(value.evidence)}</dd>

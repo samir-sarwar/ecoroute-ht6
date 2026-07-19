@@ -222,7 +222,7 @@ def test_openai_provider_contract_requires_matching_regional_endpoint() -> None:
         ModelEndpointCreate.model_validate(payload)
 
 
-def test_azure_openai_requires_official_single_region_deployment_contract(
+def test_azure_openai_requires_official_deployment_contract(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("ECOROUTE_DEMO_MODE", "false")
@@ -249,7 +249,20 @@ def test_azure_openai_requires_official_single_region_deployment_contract(
 
     payload["baseUrl"] = "https://canada.openai.azure.com/openai/v1"
     payload["azureDeploymentType"] = "global_standard"
-    with pytest.raises(ValidationError, match="standard.*provisioned_managed"):
+    payload["region"] = "global"
+    payload["gridZone"] = "unknown"
+    payload["gridAttribution"] = "unknown"
+    value = ModelEndpointCreate.model_validate(payload)
+    assert value.azure_deployment_type == "global_standard"
+
+    payload["region"] = "canada-central"
+    with pytest.raises(ValidationError, match="region=global"):
+        ModelEndpointCreate.model_validate(payload)
+
+    payload["region"] = "global"
+    payload["gridZone"] = "CA-ON"
+    payload["gridAttribution"] = "regional_proxy"
+    with pytest.raises(ValidationError, match="gridZone=unknown"):
         ModelEndpointCreate.model_validate(payload)
 
 

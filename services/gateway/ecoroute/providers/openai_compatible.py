@@ -214,15 +214,48 @@ class OpenAICompatibleProvider:
         started = asyncio.get_running_loop().time()
         token = resolve_credential(endpoint.credential_ref, self.settings)
         headers = {"Authorization": f"Bearer {token}"} if token else {}
-        url = endpoint.base_url.rstrip("/") + (
-            "/api/tags" if endpoint.provider == "ollama" else "/models"
-        )
+        if endpoint.provider == "freesolo":
+            parsed = urlparse(endpoint.base_url)
+            origin = f"{parsed.scheme}://{parsed.netloc}"
+            urls = [f"{origin}/healthz"]
+        else:
+            urls = [
+                endpoint.base_url.rstrip("/")
+                + ("/api/tags" if endpoint.provider == "ollama" else "/models")
+            ]
         params = {"key": token} if endpoint.provider == "gemini" and token else None
         try:
             await validate_network_target(endpoint, self.settings)
             async with httpx.AsyncClient(timeout=3) as client:
-                response = await client.get(url, headers=headers, params=params)
-                response.raise_for_status()
+                for url in urls:
+                    response = await client.get(url, headers=headers, params=params)
+                    response.raise_for_status()
+            if endpoint.provider == "freesolo":
+                # FreeSOLO's public adapter-status route can reject the same bearer
+                # credential that its OpenAI-compatible inference route accepts. A
+                # minimal completion checks the exact adapter, authentication, and
+                # serving path instead of treating that status-route mismatch as an
+                # unhealthy deployment.
+                async with httpx.AsyncClient(
+                    timeout=max(3, self.settings.provider_timeout_seconds)
+                ) as client:
+                    response = await client.post(
+                        endpoint.base_url.rstrip("/") + "/chat/completions",
+                        headers={**headers, "Content-Type": "application/json"},
+                        json={
+                            "model": endpoint.physical_model,
+                            "messages": [{"role": "user", "content": "Health check."}],
+                            "temperature": 0,
+                            "max_tokens": 1,
+                            "stream": False,
+                        },
+                    )
+                    response.raise_for_status()
+                    if not response.json().get("choices"):
+                        raise ProviderError(
+                            "FreeSOLO health completion returned no choices",
+                            "upstream_invalid_response",
+                        )
             return {
                 "status": "healthy",
                 "provider": endpoint.provider,

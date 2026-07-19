@@ -26,6 +26,12 @@ from ecoroute.api.schemas import (
 )
 from ecoroute.cache import CacheService, exact_fingerprint
 from ecoroute.cache.service import freshen_cached_completion
+from ecoroute.carbon.demo_region import (
+    choose_demo_region_overlay,
+    counterfactual_impact,
+    demo_energy_estimate,
+    parse_demo_region_candidates,
+)
 from ecoroute.carbon.impact import calculate_impact
 from ecoroute.carbon.service import CarbonService
 from ecoroute.config import get_settings
@@ -48,7 +54,10 @@ from ecoroute.providers.registry import ProviderRegistry
 from ecoroute.routing.classifier import classify, deterministic_classify
 from ecoroute.routing.engine import (
     EndpointCandidate,
+    estimate_energy,
     exact_cache_eligible,
+    grid_state,
+    routing_grid_intensity,
     select_candidate,
     semantic_cache_eligible,
 )
@@ -162,13 +171,17 @@ def _impact_evidence(
     selected: EndpointCandidate,
     selected_endpoint: ModelEndpoint,
     selected_reading: CarbonReading,
+    *,
+    demo_global_region_overlay: dict[str, Any] | None = None,
+    input_tokens: int | None = None,
+    output_tokens: int | None = None,
 ) -> dict[str, Any]:
     evidence_rank = {"measured": 0, "estimated": 1, "stale": 2, "simulated": 3}
     carbon_level = max(
         (baseline_reading.evidence, selected_reading.evidence),
         key=lambda value: evidence_rank[value],
     )
-    return {
+    evidence: dict[str, Any] = {
         "energy_level": selected.energy_evidence,
         "carbon_level": carbon_level,
         "energy_source": selected_endpoint.name + ":" + selected_endpoint.coefficient_version,
@@ -204,6 +217,68 @@ def _impact_evidence(
         "attribution_method": "endpoint_coefficients_times_region_grid_intensity",
         "claim_scope": _claim_scope(selected_endpoint),
     }
+    if (
+        demo_global_region_overlay is not None
+        and input_tokens is not None
+        and output_tokens is not None
+    ):
+        baseline_energy = demo_energy_estimate(
+            baseline.quality_tier,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            configured_energy_kwh=estimate_energy(baseline, input_tokens, output_tokens),
+        )
+        selected_energy = demo_energy_estimate(
+            selected.quality_tier,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            configured_energy_kwh=estimate_energy(selected, input_tokens, output_tokens),
+        )
+        selected_energy["energyKwh"] = float(selected_energy["energyKwh"]) + 0.000002
+        counterfactual = counterfactual_impact(
+            demo_global_region_overlay,
+            baseline_energy_kwh=float(baseline_energy["energyKwh"]),
+            selected_energy_kwh=float(selected_energy["energyKwh"]),
+        )
+        counterfactual["energy"] = {
+            "baseline": baseline_energy,
+            "selected": selected_energy,
+            "routerEnergyKwh": 0.000002,
+        }
+        evidence["demo_global_region_counterfactual"] = counterfactual
+    return evidence
+
+
+async def _demo_global_region_overlay(
+    session: AsyncSession,
+    carbon_service: CarbonService,
+    policy: RoutingPolicyConfig,
+    endpoints: list[ModelEndpoint],
+) -> dict[str, Any] | None:
+    if (
+        settings.demo_mode
+        or not settings.demo_global_region_overlay
+        or not any(
+            endpoint.provider == "azure_openai"
+            and endpoint.azure_deployment_type == "global_standard"
+            for endpoint in endpoints
+        )
+    ):
+        return None
+    try:
+        candidates = parse_demo_region_candidates(settings.demo_global_region_candidates)
+    except ValueError:
+        return None
+    readings: list[tuple[Any, CarbonReading]] = []
+    for candidate in candidates:
+        reading = await carbon_service.reading(
+            session,
+            candidate.zone,
+            demo_scenario=None,
+            allow_stale_minutes=policy.allow_stale_carbon_minutes,
+        )
+        readings.append((candidate, reading))
+    return choose_demo_region_overlay(readings, settings.demo_global_reference_region)
 
 
 async def _load_context(
@@ -643,6 +718,12 @@ async def chat_completions(
         )
         for endpoint in endpoint_rows
     }
+    demo_region_overlay = await _demo_global_region_overlay(
+        session,
+        carbon_service,
+        policy,
+        endpoint_rows,
+    )
     for endpoint in endpoint_rows:
         reading = readings[endpoint.id]
         if _carbon_accounting_available(endpoint, reading):
@@ -670,6 +751,16 @@ async def chat_completions(
     if logical.alias == "support-cloud" and len(candidates) == 1:
         candidates = [replace(candidates[0], health_state="healthy")]
     baseline = next(item for item in candidates if item.id == logical.baseline_endpoint_id)
+    if demo_region_overlay is not None:
+        baseline = replace(
+            baseline,
+            routing_grid_intensity=float(
+                demo_region_overlay["reference"]["intensityGco2Kwh"]
+            ),
+        )
+        candidates = [
+            baseline if candidate.id == baseline.id else candidate for candidate in candidates
+        ]
     baseline_row = next(item for item in endpoint_rows if item.id == baseline.id)
     accounting_baseline = baseline
     accounting_baseline_row = baseline_row
@@ -714,22 +805,35 @@ async def chat_completions(
 
     selected_row = next(endpoint for endpoint in endpoint_rows if endpoint.id == selected.id)
     row.selected_endpoint_id = selected.id
+    routing_grid_state = grid_state(
+        routing_grid_intensity(baseline),
+        policy.clean_threshold_gco2_kwh,
+        policy.dirty_threshold_gco2_kwh,
+    )
+    selected_grid_state = grid_state(
+        selected.grid_intensity if selected.carbon_available else None,
+        policy.clean_threshold_gco2_kwh,
+        policy.dirty_threshold_gco2_kwh,
+    )
     decision = RouteDecision(
         request_id=request_id,
         policy_id=policy_row.id,
-        grid_state=(
-            "unknown"
-            if not selected.carbon_available
-            else "clean"
-            if selected.grid_intensity <= policy.clean_threshold_gco2_kwh
-            else "dirty"
-            if selected.grid_intensity >= policy.dirty_threshold_gco2_kwh
-            else "moderate"
-        ),
+        grid_state=selected_grid_state,
         candidate_snapshot=[snapshot.model_dump(mode="json") for snapshot in snapshots],
         selected_endpoint_id=selected.id,
         selection_reason=selection_reason,
-        score_breakdown={"weights": policy.weights.model_dump(mode="json")},
+        score_breakdown={
+            "weights": policy.weights.model_dump(mode="json"),
+            "routingGridState": routing_grid_state,
+            "selectedGridState": selected_grid_state,
+            "baselineGridIntensityGco2Kwh": (
+                baseline.grid_intensity if baseline.carbon_available else None
+            ),
+            "selectedGridIntensityGco2Kwh": (
+                selected.grid_intensity if selected.carbon_available else None
+            ),
+            "demoGlobalRegionOverlay": demo_region_overlay,
+        },
     )
     session.add(decision)
     await publish_event(
@@ -1015,6 +1119,9 @@ async def chat_completions(
                             stream_selected,
                             stream_selected_row,
                             readings[stream_selected.id],
+                            demo_global_region_overlay=demo_region_overlay,
+                            input_tokens=input_tokens,
+                            output_tokens=output_tokens,
                         ),
                     )
                 )
@@ -1449,6 +1556,9 @@ async def chat_completions(
                 selected,
                 selected_row,
                 readings[selected.id],
+                demo_global_region_overlay=demo_region_overlay,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
             ),
         )
     )

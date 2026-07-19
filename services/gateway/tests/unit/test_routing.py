@@ -31,6 +31,7 @@ def endpoint(
     carbon_evidence: str = "simulated",
     processing_location_evidence: str = "simulated",
     grid_attribution: str = "simulated",
+    routing_grid_intensity: float | None = None,
 ) -> EndpointCandidate:
     return EndpointCandidate(
         id=uuid.uuid5(uuid.NAMESPACE_DNS, name),
@@ -56,6 +57,7 @@ def endpoint(
         carbon_evidence=carbon_evidence,
         processing_location_evidence=processing_location_evidence,
         grid_attribution=grid_attribution,
+        routing_grid_intensity=routing_grid_intensity,
     )
 
 
@@ -97,6 +99,34 @@ def test_dirty_grid_prefers_approved_specialized() -> None:
     )
     assert selected.id == specialized.id
     assert reason == "dirty_grid_specialized_preference"
+
+
+def test_live_demo_routing_signal_does_not_claim_endpoint_carbon() -> None:
+    baseline = endpoint(
+        "global-frontier",
+        "frontier",
+        275,
+        "8",
+        carbon_available=False,
+        routing_grid_intensity=650,
+    )
+    specialized = endpoint(
+        "support",
+        "specialized",
+        275,
+        "0.3",
+        profile=True,
+        carbon_available=False,
+    )
+    policy = RoutingPolicyConfig(enabled_endpoint_ids=[baseline.id, specialized.id])
+
+    selected, snapshots, reason = select_candidate(
+        [baseline, specialized], context(), low(), policy, baseline, baseline.id
+    )
+
+    assert selected.id == specialized.id
+    assert reason == "dirty_grid_specialized_preference"
+    assert all(snapshot.estimated_carbon_g is None for snapshot in snapshots)
 
 
 def test_clean_grid_uses_general_small_route() -> None:

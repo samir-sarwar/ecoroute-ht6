@@ -20,6 +20,10 @@ test("customer request appears live in the separate operator experience", async 
   await expect(support.getByText(/30 days/i).last()).toBeVisible();
 
   await page.bringToFront();
+  await expect(page.getByRole("heading", { name: "Live routing trace" })).toBeVisible();
+  await expect(page.getByText("model: support-default", { exact: true })).toBeVisible();
+  await expect(page.locator(".route-chain .selected-route code")).not.toBeEmpty();
+  await expect(page.getByRole("heading", { name: "Baseline vs EcoRoute" })).toBeVisible();
   await expect(page.locator(".feed-row").first()).toBeVisible({ timeout: 20_000 });
   await page.locator(".feed-row").first().click();
   await expect(page.getByRole("heading", { name: "Request Audit" })).toBeVisible();

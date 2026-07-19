@@ -236,7 +236,9 @@ class ModelEndpointCreate(ApiModel):
     base_url: str
     credential_ref: str | None = Field(None, max_length=200)
     physical_model: str = Field(min_length=1, max_length=300)
-    azure_deployment_type: Literal["standard", "provisioned_managed"] | None = None
+    azure_deployment_type: Literal[
+        "standard", "provisioned_managed", "global_standard"
+    ] | None = None
     region: str = Field(min_length=1, max_length=100)
     grid_zone: str = Field(min_length=1, max_length=100)
     grid_lookup_mode: Literal["zone", "data_center"] = "zone"
@@ -336,10 +338,18 @@ class ModelEndpointCreate(ApiModel):
                     "Azure OpenAI endpoints require an official HTTPS resource URL ending "
                     "in /openai/v1"
                 )
-            if self.azure_deployment_type not in {"standard", "provisioned_managed"}:
+            if self.azure_deployment_type == "global_standard":
+                if self.region.casefold() != "global":
+                    raise ValueError("Azure Global Standard endpoints require region=global")
+                if self.grid_zone.casefold() != "unknown" or self.grid_attribution != "unknown":
+                    raise ValueError(
+                        "Azure Global Standard endpoints require gridZone=unknown and "
+                        "gridAttribution=unknown"
+                    )
+            elif self.azure_deployment_type not in {"standard", "provisioned_managed"}:
                 raise ValueError(
-                    "Azure regional routing requires a Standard or regional Provisioned "
-                    "Managed deployment"
+                    "Azure endpoints require Standard, regional Provisioned Managed, or "
+                    "Global Standard deployment metadata"
                 )
             if not self.credential_ref:
                 raise ValueError("Azure OpenAI endpoints require credentialRef")
@@ -355,8 +365,7 @@ class ModelEndpointCreate(ApiModel):
                 demo_mode and self.processing_location_evidence == "simulated"
             ):
                 raise ValueError(
-                    "Azure regional endpoints require provider-contract processing-location "
-                    "evidence"
+                    "Azure endpoints require provider-contract processing-location evidence"
                 )
         elif self.azure_deployment_type is not None:
             raise ValueError("azureDeploymentType requires provider=azure_openai")
@@ -429,7 +438,9 @@ class CandidateSnapshot(BaseModel):
     latency_p95_ms: int
     evidence: EvidenceLevel
     region: str | None = None
-    azure_deployment_type: Literal["standard", "provisioned_managed"] | None = None
+    azure_deployment_type: Literal[
+        "standard", "provisioned_managed", "global_standard"
+    ] | None = None
     grid_zone: str | None = None
     carbon_evidence: EvidenceLevel | None = None
     processing_location_evidence: ProcessingLocationEvidence = "unknown"

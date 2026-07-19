@@ -63,6 +63,15 @@ class EndpointCandidate:
     processing_location_evidence: str = "unknown"
     grid_attribution: str = "unknown"
     azure_deployment_type: str | None = None
+    # A live grid signal may drive a demo policy without asserting that it is
+    # the endpoint's actual processing grid. It is never used for carbon accounting.
+    routing_grid_intensity: float | None = None
+
+
+def routing_grid_intensity(candidate: EndpointCandidate) -> float | None:
+    if candidate.routing_grid_intensity is not None:
+        return candidate.routing_grid_intensity
+    return candidate.grid_intensity if candidate.carbon_available else None
 
 
 def evidence_penalty(candidate: EndpointCandidate) -> float:
@@ -271,7 +280,7 @@ def select_candidate(
 
     # Dirty-grid support traffic has an explicit in-domain specialized preference.
     local_grid = grid_state(
-        baseline.grid_intensity if baseline.carbon_available else None,
+        routing_grid_intensity(baseline),
         policy.clean_threshold_gco2_kwh,
         policy.dirty_threshold_gco2_kwh,
     )

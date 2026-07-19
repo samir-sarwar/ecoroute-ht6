@@ -82,18 +82,21 @@ The root `compose.yaml` includes the canonical `infra/compose.yaml`, so root com
 automation share one service definition instead of duplicated Compose files. `make
 impact-validate` re-runs a generated export with the exactly pinned Impact Framework CLI.
 
-## External artifacts intentionally not present
+## External integrations
 
 - `GEMINI_API_KEY` is blank, so live synthetic dataset generation cannot be exercised yet. The
   official `google-genai` structured-output adapter, durable job, review workflow, and reviewed
   manual import path are complete.
-- No trained FreeSOLO router/support deployment IDs are available. The locked Qwen recipes,
-  current `flash` CLI adapter, environment packaging, dry-run/quote/confirm lifecycle,
-  evaluation gates, import, deploy, export, and gateway endpoint adapters are complete. The seeded
-  credential-free demo uses deterministic routing and fake physical endpoints.
+- Deployed FreeSOLO router and Northstar support-SLM IDs are recorded in
+  `scripts/eval_deployment.py`; the support model is served as
+  `flash-1784393778-a0fbce92`. They are not automatically activated by the seed because live use
+  requires the operator's FreeSOLO credential, explicit endpoint registration, and evaluation
+  evidence. The seeded credential-free demo continues to use deterministic routing and fake
+  physical endpoints.
 
 No Git repository or remote repository is created by setup.
 
-See [the demo runbook](docs/demo-runbook.md),
+See [the portable demo runbook](docs/demo-runbook.md),
+[the live hosted demo runbook](docs/live-hosted-demo.md),
 [measurement methodology](docs/measurement-methodology.md), and
 [implementation matrix](docs/spec-implementation-matrix.md).

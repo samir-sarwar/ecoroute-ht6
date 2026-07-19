@@ -403,6 +403,59 @@ def _endpoint_json(endpoint: ModelEndpoint) -> dict[str, Any]:
     }
 
 
+def _route_endpoint_json(endpoint: ModelEndpoint | None) -> dict[str, Any] | None:
+    """Return the non-secret endpoint fields needed to explain a routing decision."""
+    if endpoint is None:
+        return None
+    return {
+        "id": str(endpoint.id),
+        "name": endpoint.name,
+        "provider": endpoint.provider,
+        "physicalModel": endpoint.physical_model,
+        "region": endpoint.region,
+        "gridZone": endpoint.grid_zone,
+        "qualityTier": endpoint.quality_tier,
+        "energyEvidence": endpoint.energy_evidence,
+        "processingLocationEvidence": endpoint.processing_location_evidence,
+        "gridAttribution": endpoint.grid_attribution,
+        "selfHosted": endpoint.self_hosted,
+        "healthState": endpoint.health_state,
+        "coefficientVersion": endpoint.coefficient_version,
+    }
+
+
+def _demo_counterfactual(evidence: dict[str, Any] | None) -> dict[str, Any] | None:
+    value = (evidence or {}).get("demo_global_region_counterfactual")
+    return value if isinstance(value, dict) else None
+
+
+async def _enrich_candidate_snapshot(
+    session: AsyncSession, candidates: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    endpoint_ids: list[uuid.UUID] = []
+    for candidate in candidates:
+        raw_id = candidate.get("endpoint_id", candidate.get("endpointId"))
+        try:
+            endpoint_ids.append(uuid.UUID(str(raw_id)))
+        except (TypeError, ValueError):
+            continue
+    endpoints = {
+        endpoint.id: endpoint
+        for endpoint in (
+            await session.scalars(select(ModelEndpoint).where(ModelEndpoint.id.in_(endpoint_ids)))
+        ).all()
+    }
+    enriched: list[dict[str, Any]] = []
+    for candidate in candidates:
+        raw_id = candidate.get("endpoint_id", candidate.get("endpointId"))
+        try:
+            endpoint = endpoints.get(uuid.UUID(str(raw_id)))
+        except (TypeError, ValueError):
+            endpoint = None
+        enriched.append({**candidate, "endpoint": _route_endpoint_json(endpoint)})
+    return enriched
+
+
 @router.get("/overview")
 async def overview(
     window: str = "1h",
@@ -506,8 +559,11 @@ async def overview(
     )
     latest = list(
         (
-            await session.scalars(
-                select(GatewayRequest).order_by(GatewayRequest.started_at.desc()).limit(12)
+            await session.execute(
+                select(GatewayRequest, ModelEndpoint)
+                .outerjoin(ModelEndpoint, ModelEndpoint.id == GatewayRequest.selected_endpoint_id)
+                .order_by(GatewayRequest.started_at.desc())
+                .limit(12)
             )
         ).all()
     )
@@ -516,18 +572,33 @@ async def overview(
             await session.execute(
                 select(
                     GatewayRequest.started_at,
+                    ImpactRecord.baseline_energy_kwh,
+                    ImpactRecord.actual_energy_kwh,
                     ImpactRecord.baseline_carbon_g,
                     ImpactRecord.actual_carbon_g,
+                    ImpactRecord.baseline_cost_usd,
+                    ImpactRecord.actual_cost_usd,
+                    ImpactRecord.carbon_accounting_available,
+                    ImpactRecord.evidence,
                 )
                 .join(ImpactRecord, ImpactRecord.request_id == GatewayRequest.id)
                 .where(
                     GatewayRequest.started_at >= since,
-                    ImpactRecord.carbon_accounting_available.is_(True),
+                    ImpactRecord.strategy == "end_to_end",
                 )
                 .order_by(GatewayRequest.started_at)
                 .limit(500)
             )
         ).all()
+    )
+    counterfactual_points = [
+        value
+        for point in impact_points
+        if (value := _demo_counterfactual(point[8])) is not None
+    ]
+    counterfactual_carbon = sum(float(item["targetCarbonG"]) for item in counterfactual_points)
+    counterfactual_avoided = sum(
+        float(item["avoidedCarbonG"]) for item in counterfactual_points
     )
     endpoint_energy = list(
         (
@@ -599,6 +670,94 @@ async def overview(
                 "severity": "info",
             }
         )
+
+    latest_completed = next(
+        ((item, endpoint) for item, endpoint in latest if item.status == "completed"), None
+    )
+    latest_decision: dict[str, Any] | None = None
+    if latest_completed is not None:
+        latest_request, selected_endpoint = latest_completed
+        decision = await session.scalar(
+            select(RouteDecision).where(RouteDecision.request_id == latest_request.id)
+        )
+        request_impact = await session.scalar(
+            select(ImpactRecord).where(
+                ImpactRecord.request_id == latest_request.id,
+                ImpactRecord.strategy == "end_to_end",
+            )
+        )
+        logical = await session.get(LogicalModel, latest_request.logical_model_id)
+        baseline_endpoint = (
+            await session.get(ModelEndpoint, logical.baseline_endpoint_id) if logical else None
+        )
+        candidates = await _enrich_candidate_snapshot(
+            session, list(decision.candidate_snapshot) if decision else []
+        )
+        execution_mode = (
+            "cache"
+            if latest_request.cache_status in {"exact", "semantic"}
+            else "simulated"
+            if settings.demo_mode or (selected_endpoint and selected_endpoint.provider == "fake")
+            else "live"
+        )
+        latest_decision = {
+            "id": str(latest_request.id),
+            "time": latest_request.started_at.isoformat(),
+            "status": latest_request.status,
+            "promptPreview": latest_request.redacted_prompt_preview,
+            "requestedModel": latest_request.requested_model_alias,
+            "providerModel": selected_endpoint.physical_model if selected_endpoint else None,
+            "providerCalled": latest_request.cache_status not in {"exact", "semantic"},
+            "executionMode": execution_mode,
+            "cache": latest_request.cache_status,
+            "fallback": latest_request.fallback_used,
+            "durationMs": latest_request.duration_ms,
+            "inputTokens": latest_request.input_tokens,
+            "outputTokens": latest_request.output_tokens,
+            "classification": latest_request.router_classification,
+            "gridState": decision.grid_state if decision else "unknown",
+            "routingGridState": (
+                decision.score_breakdown.get("routingGridState", decision.grid_state)
+                if decision
+                else "unknown"
+            ),
+            "selectedGridState": decision.grid_state if decision else "unknown",
+            "selectionReason": decision.selection_reason if decision else "cache_reuse",
+            "demoRegionRecommendation": (
+                decision.score_breakdown.get("demoGlobalRegionOverlay") if decision else None
+            ),
+            "selectedEndpoint": _route_endpoint_json(selected_endpoint),
+            "baselineEndpoint": _route_endpoint_json(baseline_endpoint),
+            "candidates": candidates,
+            "impact": (
+                {
+                    "baselineEnergyKwh": request_impact.baseline_energy_kwh,
+                    "actualEnergyKwh": request_impact.actual_energy_kwh,
+                    "baselineCarbonG": (
+                        request_impact.baseline_carbon_g
+                        if request_impact.carbon_accounting_available
+                        else None
+                    ),
+                    "actualCarbonG": (
+                        request_impact.actual_carbon_g
+                        if request_impact.carbon_accounting_available
+                        else None
+                    ),
+                    "rawCarbonDeltaG": (
+                        request_impact.raw_carbon_delta_g
+                        if request_impact.carbon_accounting_available
+                        else None
+                    ),
+                    "baselineCostUsd": float(request_impact.baseline_cost_usd),
+                    "actualCostUsd": float(request_impact.actual_cost_usd),
+                    "carbonAccountingAvailable": request_impact.carbon_accounting_available,
+                    "demoCounterfactual": _demo_counterfactual(request_impact.evidence),
+                    "evidence": request_impact.evidence,
+                }
+                if request_impact
+                else None
+            ),
+        }
     return {
         "workspaceId": str(workspace.id),
         "window": window,
@@ -609,6 +768,12 @@ async def overview(
         "actualCarbonGrams": float(impact[0]) if int(impact[4]) else None,
         "avoidedCarbonGrams": max(0, float(impact[1])) if int(impact[4]) else None,
         "carbonAccountedRequests": int(impact[4]),
+        "counterfactualCarbonGrams": (
+            counterfactual_carbon if counterfactual_points else None
+        ),
+        "counterfactualAvoidedCarbonGrams": (
+            counterfactual_avoided if counterfactual_points else None
+        ),
         "actualCostUsd": float(impact[2]),
         "costDeltaUsd": float(impact[2] - impact[3]),
         "grid": reading.model_dump(mode="json")
@@ -634,8 +799,40 @@ async def overview(
         "carbonSeries": [
             {
                 "time": point[0].isoformat(),
-                "baseline": point[1],
-                "actual": point[2],
+                "baseline": point[3] if point[7] else None,
+                "actual": point[4] if point[7] else None,
+            }
+            for point in impact_points
+        ],
+        "impactSeries": [
+            {
+                "time": point[0].isoformat(),
+                "baselineEnergyKwh": point[1],
+                "actualEnergyKwh": point[2],
+                "baselineCarbonG": (
+                    point[3]
+                    if point[7]
+                    else counterfactual["baselineCarbonG"]
+                    if (counterfactual := _demo_counterfactual(point[8]))
+                    else None
+                ),
+                "actualCarbonG": (
+                    point[4]
+                    if point[7]
+                    else counterfactual["targetCarbonG"]
+                    if (counterfactual := _demo_counterfactual(point[8]))
+                    else None
+                ),
+                "baselineCostUsd": float(point[5]),
+                "actualCostUsd": float(point[6]),
+                "carbonAccountingAvailable": point[7],
+                "carbonComparisonKind": (
+                    "attributed"
+                    if point[7]
+                    else "demo_counterfactual"
+                    if _demo_counterfactual(point[8])
+                    else "unavailable"
+                ),
             }
             for point in impact_points
         ],
@@ -646,6 +843,7 @@ async def overview(
         "qualityFallbackCount": quality_fallback_count,
         "warnings": warnings,
         "evidence": reading.evidence if reading else "stale",
+        "latestDecision": latest_decision,
         "recentRequests": [
             {
                 "id": str(item.id),
@@ -655,8 +853,13 @@ async def overview(
                 "cache": item.cache_status,
                 "fallback": item.fallback_used,
                 "durationMs": item.duration_ms,
+                "route": endpoint.name if endpoint else "cache",
+                "provider": endpoint.provider if endpoint else None,
+                "physicalModel": endpoint.physical_model if endpoint else None,
+                "region": endpoint.region if endpoint else None,
+                "qualityTier": endpoint.quality_tier if endpoint else None,
             }
-            for item in latest
+            for item, endpoint in latest
         ],
     }
 
@@ -891,6 +1094,18 @@ async def test_endpoint(
         raise EcoRouteError("Endpoint not found", status_code=404, code="not_found")
     started = datetime.now(timezone.utc)
     result = await providers.for_provider(endpoint.provider).health(endpoint)
+    checked_at = datetime.now(timezone.utc)
+    health_state = str(result.get("status", "unknown"))
+    endpoint.health_state = (
+        health_state if health_state in {"healthy", "degraded", "unhealthy"} else "unknown"
+    )
+    endpoint.last_health_at = checked_at
+    endpoint.last_health_error = (
+        None
+        if endpoint.health_state == "healthy"
+        else str(result.get("message") or result.get("error") or "Health probe failed")[:2000]
+    )
+    await session.commit()
     scenario = await _redis_text(redis, "ecoroute:demo:grid", "moderate")
     reading = await CarbonService(settings, redis).reading(
         session,
@@ -1444,6 +1659,23 @@ async def request_detail(
         if item.selected_endpoint_id
         else None
     )
+    logical = await session.get(LogicalModel, item.logical_model_id)
+    baseline_endpoint = (
+        await session.get(ModelEndpoint, logical.baseline_endpoint_id) if logical else None
+    )
+    attempt_endpoints = {
+        endpoint.id: endpoint
+        for endpoint in (
+            await session.scalars(
+                select(ModelEndpoint).where(
+                    ModelEndpoint.id.in_([attempt.endpoint_id for attempt in attempts])
+                )
+            )
+        ).all()
+    }
+    decision_candidates = await _enrich_candidate_snapshot(
+        session, list(decision.candidate_snapshot) if decision else []
+    )
     return {
         "id": str(item.id),
         "status": item.status,
@@ -1454,6 +1686,8 @@ async def request_detail(
         "cache": item.cache_status,
         "selectedEndpointId": str(item.selected_endpoint_id) if item.selected_endpoint_id else None,
         "selectedEndpoint": selected_endpoint.name if selected_endpoint else None,
+        "selectedEndpointDetails": _route_endpoint_json(selected_endpoint),
+        "baselineEndpointDetails": _route_endpoint_json(baseline_endpoint),
         "fallbackUsed": item.fallback_used,
         "durationMs": item.duration_ms,
         "timeline": [
@@ -1473,12 +1707,15 @@ async def request_detail(
             {
                 "policyId": str(decision.policy_id),
                 "gridState": decision.grid_state,
-                "candidates": decision.candidate_snapshot,
+                "candidates": decision_candidates,
                 "selectedEndpointId": str(decision.selected_endpoint_id)
                 if decision.selected_endpoint_id
                 else None,
                 "selectionReason": decision.selection_reason,
                 "scoreBreakdown": decision.score_breakdown,
+                "demoRegionRecommendation": decision.score_breakdown.get(
+                    "demoGlobalRegionOverlay"
+                ),
                 "createdAt": decision.created_at.isoformat(),
             }
             if decision
@@ -1496,6 +1733,7 @@ async def request_detail(
                 "upstreamRequestId": attempt.upstream_request_id,
                 "qualityVerdict": attempt.quality_verdict,
                 "errorCode": attempt.error_code,
+                "endpoint": _route_endpoint_json(attempt_endpoints.get(attempt.endpoint_id)),
                 "startedAt": attempt.started_at.isoformat(),
                 "completedAt": attempt.completed_at.isoformat() if attempt.completed_at else None,
             }
@@ -1518,6 +1756,7 @@ async def request_detail(
                 "baselineCostUsd": str(value.baseline_cost_usd),
                 "actualCostUsd": str(value.actual_cost_usd),
                 "carbonAccountingAvailable": value.carbon_accounting_available,
+                "demoCounterfactual": _demo_counterfactual(value.evidence),
                 "evidence": value.evidence,
             }
             for value in impacts
