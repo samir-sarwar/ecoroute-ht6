@@ -103,6 +103,16 @@ def resolve_credential(reference: str | None, settings: Settings) -> str | None:
     return os.environ.get(variable)
 
 
+def _health_url(endpoint: ModelEndpoint) -> str:
+    """Readiness probe URL, since not every OpenAI-compatible server lists models."""
+    base = endpoint.base_url.rstrip("/")
+    if endpoint.provider == "freesolo":
+        # FreeSOLO serves chat completions under /v1 but implements no /v1/models
+        # route; its readiness endpoint sits at the service root.
+        return re.sub(r"/v1$", "", base) + "/healthz"
+    return base + "/models"
+
+
 def _litellm_model(endpoint: ModelEndpoint) -> str:
     prefixes = {
         "gemini": "gemini",
@@ -214,7 +224,7 @@ class OpenAICompatibleProvider:
         started = asyncio.get_running_loop().time()
         token = resolve_credential(endpoint.credential_ref, self.settings)
         headers = {"Authorization": f"Bearer {token}"} if token else {}
-        url = endpoint.base_url.rstrip("/") + "/models"
+        url = _health_url(endpoint)
         params = {"key": token} if endpoint.provider == "gemini" and token else None
         try:
             await validate_network_target(endpoint, self.settings)
@@ -228,11 +238,13 @@ class OpenAICompatibleProvider:
                 "latencyMs": int((asyncio.get_running_loop().time() - started) * 1000),
             }
         except (httpx.HTTPError, ProviderError) as exc:
+            status = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
+            detail = f" (HTTP {status})" if status is not None else ""
             return {
                 "status": "unhealthy",
                 "provider": endpoint.provider,
                 "error": type(exc).__name__,
-                "message": "Provider model-list/health probe failed",
+                "message": f"Health probe failed for {url}{detail}",
             }
 
     async def chat(self, endpoint: ModelEndpoint, request: ChatCompletionRequest) -> dict[str, Any]:
