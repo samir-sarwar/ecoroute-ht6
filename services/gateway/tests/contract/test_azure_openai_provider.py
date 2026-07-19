@@ -118,6 +118,89 @@ async def test_chat_uses_azure_v1_endpoint_api_key_and_deployment(
 
 
 @pytest.mark.asyncio
+async def test_gpt5_chat_normalizes_unsupported_reasoning_parameters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: dict[str, Any] = {}
+    target = endpoint()
+    target.physical_model = "gpt-5.4-mini"
+    chat_request = ChatCompletionRequest.model_validate(
+        {
+            "model": "logical-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "temperature": 0,
+            "top_p": 1,
+            "max_tokens": 256,
+            "presence_penalty": 0,
+            "frequency_penalty": 0,
+        }
+    )
+
+    def handler(upstream: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(upstream.content)
+        return httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-azure-gpt5",
+                "object": "chat.completion",
+                "model": "gpt-5.4-mini",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "Hello"},
+                        "finish_reason": "stop",
+                    }
+                ],
+            },
+        )
+
+    await adapter(monkeypatch, handler).chat(target, chat_request)
+
+    assert seen["body"]["model"] == "gpt-5.4-mini"
+    assert seen["body"]["max_completion_tokens"] == 256
+    for parameter in AzureOpenAIProvider._GPT5_UNSUPPORTED_PARAMETERS | {"max_tokens"}:
+        assert parameter not in seen["body"]
+
+
+@pytest.mark.asyncio
+async def test_non_streaming_chat_drops_stream_options(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: dict[str, Any] = {}
+    chat_request = ChatCompletionRequest.model_validate(
+        {
+            "model": "logical-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        }
+    )
+
+    def handler(upstream: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(upstream.content)
+        return httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-azure",
+                "object": "chat.completion",
+                "model": "gpt-deployment-canada",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "Hello"},
+                        "finish_reason": "stop",
+                    }
+                ],
+            },
+        )
+
+    await adapter(monkeypatch, handler).chat(endpoint(), chat_request)
+
+    assert seen["body"]["stream"] is False
+    assert "stream_options" not in seen["body"]
+
+
+@pytest.mark.asyncio
 async def test_health_is_authenticated_and_reports_deployment_visibility(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

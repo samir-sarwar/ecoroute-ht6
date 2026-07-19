@@ -71,6 +71,18 @@ async def models() -> dict[str, Any]:
     return {"object": "list", "data": [{"id": "contract-normal", "object": "model"}]}
 
 
+@fake_upstream.get("/healthz")
+async def healthz() -> dict[str, Any]:
+    return {"ok": True}
+
+
+@fake_upstream.get("/adapters/{adapter_id}")
+async def adapter_status(adapter_id: str, request: Request) -> Any:
+    if request.headers.get("Authorization") != "Bearer contract-secret":
+        return JSONResponse({"detail": "invalid key"}, status_code=401)
+    return {"adapter_id": adapter_id, "status": "ready"}
+
+
 @fake_upstream.post("/v1/chat/completions")
 async def completions(request: Request) -> Any:
     payload = await request.json()
@@ -198,6 +210,21 @@ def adapter(monkeypatch: pytest.MonkeyPatch) -> OpenAICompatibleProvider:
             ECOROUTE_STREAM_TIMEOUT_SECONDS=2,
         )
     )
+
+
+@pytest.mark.asyncio
+async def test_freesolo_health_uses_service_and_exact_model_completion(
+    upstream_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provider = adapter(monkeypatch)
+    model_endpoint = endpoint(upstream_url, "flash-support-contract")
+    model_endpoint.provider = "freesolo"
+
+    result = await provider.health(model_endpoint)
+
+    assert result["status"] == "healthy"
+    assert result["provider"] == "freesolo"
+    assert result["providerModel"] == "flash-support-contract"
 
 
 @pytest.mark.asyncio

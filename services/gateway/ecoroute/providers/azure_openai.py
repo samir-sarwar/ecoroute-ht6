@@ -19,7 +19,17 @@ from ecoroute.providers.openai_compatible import (
 
 
 class AzureOpenAIProvider:
-    """Azure OpenAI v1 data-plane adapter for explicitly regional deployments."""
+    """Azure OpenAI v1 data-plane adapter for registered deployments."""
+
+    _GPT5_UNSUPPORTED_PARAMETERS = {
+        "temperature",
+        "top_p",
+        "presence_penalty",
+        "frequency_penalty",
+        "logprobs",
+        "top_logprobs",
+        "logit_bias",
+    }
 
     def __init__(
         self,
@@ -62,6 +72,18 @@ class AzureOpenAIProvider:
         payload.pop("metadata", None)
         payload["model"] = endpoint.physical_model
         payload["stream"] = stream
+        if not stream:
+            payload.pop("stream_options", None)
+        # Azure's GPT-5 reasoning deployments reject legacy sampling parameters and
+        # use max_completion_tokens in the Chat Completions API. Deployment names are
+        # operator-defined, so this normalization applies when the registered name
+        # retains the documented GPT-5 prefix (including gpt-5.4 and gpt-5.4-mini).
+        if endpoint.physical_model.casefold().startswith("gpt-5"):
+            for parameter in AzureOpenAIProvider._GPT5_UNSUPPORTED_PARAMETERS:
+                payload.pop(parameter, None)
+            max_tokens = payload.pop("max_tokens", None)
+            if max_tokens is not None and "max_completion_tokens" not in payload:
+                payload["max_completion_tokens"] = max_tokens
         return payload
 
     @staticmethod

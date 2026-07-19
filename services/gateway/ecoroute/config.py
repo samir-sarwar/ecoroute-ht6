@@ -73,6 +73,17 @@ class Settings(BaseSettings):
     carbon_freshness_target_minutes: int = Field(
         15, validation_alias="ECOROUTE_CARBON_FRESHNESS_TARGET_MINUTES", ge=1, le=60
     )
+    demo_global_region_overlay: bool = Field(
+        False, validation_alias="ECOROUTE_DEMO_GLOBAL_REGION_OVERLAY"
+    )
+    demo_global_region_candidates: str = Field(
+        "east-us-2=US-MIDA-PJM,south-central-us=US-TEX-ERCO,"
+        "sweden-central=SE-SE3,poland-central=PL",
+        validation_alias="ECOROUTE_DEMO_GLOBAL_REGION_CANDIDATES",
+    )
+    demo_global_reference_region: str = Field(
+        "east-us-2", validation_alias="ECOROUTE_DEMO_GLOBAL_REFERENCE_REGION"
+    )
     cache_max_entries: int = Field(10_000, validation_alias="ECOROUTE_CACHE_MAX_ENTRIES")
     cache_lookup_kwh: float = Field(0.000001, validation_alias="ECOROUTE_CACHE_LOOKUP_KWH")
     max_request_body_bytes: int = Field(

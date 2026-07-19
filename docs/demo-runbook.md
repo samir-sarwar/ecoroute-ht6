@@ -4,6 +4,10 @@ The portable demo uses deterministic fake model endpoints, fixture grid data, an
 host. Every corresponding impact or telemetry value is labeled `simulated`; it is not an
 environmental claim.
 
+For the real hosted-provider presentation, use the separate
+[live hosted end-to-end runbook](live-hosted-demo.md). Do not mix its evidence claims with the
+portable fixture flow below.
+
 ## Start and verify
 
 ```bash
