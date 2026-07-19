@@ -16,6 +16,7 @@ type RequestBody = {
   sessionId?: unknown;
   messageId?: unknown;
   orderNumber?: unknown;
+  hostingMode?: unknown;
 };
 
 const identifiers = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -63,6 +64,9 @@ export async function POST(request: NextRequest) {
     }
     const input = JSON.parse(raw) as RequestBody;
     const messages = validatedMessages(input.messages);
+    if (input.hostingMode !== "regular" && input.hostingMode !== "self_hosted") {
+      return Response.json({ message: "Choose a valid inference host." }, { status: 400 });
+    }
     if (
       !messages ||
       typeof input.sessionId !== "string" ||
@@ -85,24 +89,65 @@ export async function POST(request: NextRequest) {
       method: "POST",
       headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
       body: JSON.stringify({
-        model: "support-default",
+        model: input.hostingMode === "self_hosted" ? "support-self-hosted" : "support-cloud",
         messages: [{ role: "system", content: systemPrompt }, ...messages],
         temperature: 0,
-        stream: true,
-        stream_options: { include_usage: true },
+        stream: input.hostingMode === "self_hosted",
+        stream_options: input.hostingMode === "self_hosted" ? { include_usage: true } : undefined,
         metadata: {
           demo_session_id: input.sessionId,
           demo_message_id: input.messageId,
           client_app: "northstar-support-demo",
+          hosting_mode: input.hostingMode,
         },
       }),
       signal: request.signal,
     });
     if (!upstream.ok || !upstream.body) {
+      if (input.hostingMode === "self_hosted") {
+        return Response.json(
+          { message: "The self-hosted EcoRoute VM is unavailable.", code: "self_hosted_unavailable" },
+          { status: 503 },
+        );
+      }
       return Response.json(
         { message: "Support is temporarily unavailable. Please try again." },
         { status: 503 },
       );
+    }
+    if (input.hostingMode === "regular") {
+      const completion = await upstream.json();
+      let content = String(completion.choices?.[0]?.message?.content ?? "");
+      try {
+        const structured = JSON.parse(content);
+        if (typeof structured.answer === "string") content = structured.answer;
+      } catch {
+        const answer = content.match(/"answer"\s*:\s*"((?:\\.|[^"\\])*)"/);
+        if (answer) {
+          try { content = JSON.parse(`"${answer[1]}"`); } catch { content = answer[1]; }
+        }
+      }
+      if (!content.trim()) {
+        return Response.json({ message: "The hosted support model returned an empty response." }, { status: 503 });
+      }
+      const chunk = {
+        id: completion.id ?? `chatcmpl-${input.messageId}`,
+        object: "chat.completion.chunk",
+        created: completion.created ?? Math.floor(Date.now() / 1000),
+        model: "support-cloud",
+        choices: [{ index: 0, delta: { role: "assistant", content: content.trim() }, finish_reason: "stop" }],
+      };
+      return new Response(`data: ${JSON.stringify(chunk)}\n\ndata: [DONE]\n\n`, {
+        status: 200,
+        headers: {
+          "Content-Type": "text/event-stream",
+          "Cache-Control": "no-cache, no-transform",
+          "X-Content-Type-Options": "nosniff",
+          "X-Northstar-Hosting-Mode": "regular",
+          "X-Northstar-Endpoint-Class": "cloud-slm",
+          "X-Northstar-Evidence": "provider-estimate",
+        },
+      });
     }
     // Deliberately do not forward gateway headers or credentials to browser JavaScript.
     return new Response(upstream.body, {
@@ -111,6 +156,9 @@ export async function POST(request: NextRequest) {
         "Content-Type": "text/event-stream",
         "Cache-Control": "no-cache, no-transform",
         "X-Content-Type-Options": "nosniff",
+        "X-Northstar-Hosting-Mode": input.hostingMode,
+        "X-Northstar-Endpoint-Class": input.hostingMode === "self_hosted" ? "ollama-vm" : "cloud-slm",
+        "X-Northstar-Evidence": input.hostingMode === "self_hosted" ? "benchmark-calibrated-estimate" : "provider-estimate",
       },
     });
   } catch {

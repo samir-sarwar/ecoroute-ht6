@@ -341,7 +341,7 @@ start_lab() {
     processingLocationEvidence: $processing_evidence,
     gridAttribution: $grid_attribution,
     qualityTier: "small",
-    capabilities: ["text"],
+    capabilities: ["text", "streaming"],
     contextWindowTokens: 4096,
     inputUsdPerMillionTokens: 0,
     outputUsdPerMillionTokens: 0,
@@ -374,6 +374,12 @@ start_lab() {
   fi
 
   current_endpoint_id="$(endpoint_id)"
+  curl --fail --silent --show-error \
+    -X POST \
+    -H "Authorization: Bearer $gateway_key" \
+    -H 'Content-Type: application/json' \
+    --data '{"confirm":true}' \
+    "$gateway_url/api/v1/demo/hosting-routes/configure" >/dev/null
   curl --fail --silent --show-error \
     -X POST \
     -H "Authorization: Bearer $gateway_key" \

@@ -39,6 +39,9 @@ class Settings(BaseSettings):
     )
     freesolo_router_base_url: str = Field("", validation_alias="FREESOLO_ROUTER_BASE_URL")
     freesolo_router_model_id: str = Field("", validation_alias="FREESOLO_ROUTER_MODEL_ID")
+    router_timeout_seconds: float = Field(
+        5.0, validation_alias="ECOROUTE_ROUTER_TIMEOUT_SECONDS", ge=1.0, le=30.0
+    )
     freesolo_support_base_url: str = Field("", validation_alias="FREESOLO_SUPPORT_BASE_URL")
     freesolo_support_model_id: str = Field("", validation_alias="FREESOLO_SUPPORT_MODEL_ID")
     freesolo_api_key: str = Field("", validation_alias="FREESOLO_API_KEY")
@@ -50,6 +53,9 @@ class Settings(BaseSettings):
     electricity_maps_base_url: str = Field(
         "https://api.electricitymaps.com/v4",
         validation_alias="ELECTRICITY_MAPS_BASE_URL",
+    )
+    electricity_usd_per_kwh: float = Field(
+        0.13, validation_alias="ECOROUTE_ELECTRICITY_USD_PER_KWH", ge=0
     )
     carbon_provider: Literal["auto", "electricity_maps", "carbon_aware"] = Field(
         "auto", validation_alias="ECOROUTE_CARBON_PROVIDER"
@@ -68,7 +74,7 @@ class Settings(BaseSettings):
     stream_timeout_seconds: int = Field(120, validation_alias="ECOROUTE_STREAM_TIMEOUT_SECONDS")
     carbon_cache_seconds: int = Field(300, validation_alias="ECOROUTE_CARBON_CACHE_SECONDS")
     carbon_request_timeout_seconds: float = Field(
-        5.0, validation_alias="ECOROUTE_CARBON_REQUEST_TIMEOUT_SECONDS", gt=0, le=30
+        20.0, validation_alias="ECOROUTE_CARBON_REQUEST_TIMEOUT_SECONDS", gt=0, le=30
     )
     carbon_freshness_target_minutes: int = Field(
         15, validation_alias="ECOROUTE_CARBON_FRESHNESS_TARGET_MINUTES", ge=1, le=60

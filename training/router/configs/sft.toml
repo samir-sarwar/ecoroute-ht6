@@ -10,7 +10,7 @@ split = "train"
 
 [train]
 epochs = 3
-max_examples = 8000
+max_examples = 3000
 lora_rank = 32
 lora_alpha = 64
-max_context_tokens = 4096
+max_context_tokens = 1024

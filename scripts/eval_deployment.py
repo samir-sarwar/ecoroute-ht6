@@ -24,6 +24,8 @@ import os
 import statistics
 import sys
 import time
+import uuid
+from collections import Counter
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -36,10 +38,9 @@ BASE_URL = "https://clado-ai--freesolo-lora-serving.modal.run/v1"
 TARGETS = {
     "router": {
         "env_dir": ROOT / "training" / "router",
-        # SFT-only on the domain-tier dataset. GRPO (flash-1784395194) collapsed
-        # entropy -- SFT already saturated reward (~0.99), leaving GRPO no gradient,
-        # so it overfit to one output family and failed deploy. SFT-only is clean.
-        "model": "flash-1784392297-e2a42199",
+        # Gateway-native e-commerce router SFT. The previous RouterBench adapter
+        # used an incompatible, off-domain task/capability vocabulary.
+        "model": "flash-1784439947-60cefc77",
     },
     "support": {
         "env_dir": ROOT / "training" / "support-slm",
@@ -90,24 +91,51 @@ def gate(name: str, value: float, op: str, threshold: float, fmt: str = ".4f",
 
 
 def eval_router(client, env, model, dataset) -> None:
-    sys_prompt = env.SYSTEM_PROMPT
+    import asyncio
+
+    from ecoroute.api.schemas import ChatCompletionRequest, RouterClassification
+    from ecoroute.config import Settings
+    from ecoroute.routing.classifier import classify
+    from ecoroute.routing.safety import normalize_request
+
+    # Evaluate the deployable router, not the LoRA in isolation. Production uses
+    # authoritative deterministic safety rules before learned inference and
+    # validates/normalizes the adapter response afterward.
+    settings = Settings(
+        FREESOLO_ROUTER_BASE_URL=BASE_URL,
+        FREESOLO_ROUTER_MODEL_ID=model,
+        FREESOLO_API_KEY=os.environ["FREESOLO_API_KEY"],
+    )
     valid = 0
     comp_pairs, risk_pairs = [], []
     slm_tp = slm_fp = 0
     highrisk_total = highrisk_falselow = 0
     latencies = []
     raw_scores = []
+    sources: Counter[str] = Counter()
+    rationales: Counter[str] = Counter()
 
     for i, ex in enumerate(dataset, 1):
         expected = ex["output"] if isinstance(ex["output"], dict) else json.loads(ex["output"])
-        text, dt = call_model(client, model, sys_prompt, ex["input"])
+        prompt = ex["input"].removeprefix("PROMPT: ")
+        request = ChatCompletionRequest(
+            model="router-deployment-eval",
+            messages=[{"role": "user", "content": prompt}],
+        )
+        features = normalize_request(uuid.uuid4(), request)
+        t0 = time.perf_counter()
+        result = asyncio.run(classify(features, settings))
+        dt = time.perf_counter() - t0
+        sources[result.classification_source] += 1
+        rationales[result.rationale_code] += 1
         latencies.append(dt)
-        raw_scores.append(env.score_router_response(text, expected))
+        pred = result.model_dump(exclude={"classification_source"})
+        raw_scores.append(env.score_router_response(json.dumps(pred), expected))
         try:
-            pred = json.loads(text)
-        except (json.JSONDecodeError, TypeError):
-            pred = None
-        is_valid = isinstance(pred, dict) and set(pred) == env.SCHEMA_KEYS
+            RouterClassification.model_validate(result.model_dump())
+            is_valid = set(pred) == env.SCHEMA_KEYS
+        except (ValueError, TypeError):
+            is_valid = False
         if is_valid:
             valid += 1
             comp_pairs.append((expected["complexity"], pred.get("complexity")))
@@ -150,6 +178,9 @@ def eval_router(client, env, model, dataset) -> None:
     ]
     print(f"  [info] Median router latency: {med_lat*1000:.0f} ms")
     print(f"  [info] Mean environment score: {statistics.mean(raw_scores):.4f}")
+    print(f"  [info] Classification sources: {dict(sources)}")
+    fail_closed = {key: count for key, count in rationales.items() if key.startswith("ROUTER_")}
+    print(f"  [info] Fail-closed reasons: {fail_closed}")
     print(f"\n  RESULT: {'ALL GATES PASS' if all(results) else 'SOME GATES FAILED'}")
 
 
