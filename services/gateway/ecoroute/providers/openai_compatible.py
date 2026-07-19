@@ -214,7 +214,9 @@ class OpenAICompatibleProvider:
         started = asyncio.get_running_loop().time()
         token = resolve_credential(endpoint.credential_ref, self.settings)
         headers = {"Authorization": f"Bearer {token}"} if token else {}
-        url = endpoint.base_url.rstrip("/") + "/models"
+        url = endpoint.base_url.rstrip("/") + (
+            "/api/tags" if endpoint.provider == "ollama" else "/models"
+        )
         params = {"key": token} if endpoint.provider == "gemini" and token else None
         try:
             await validate_network_target(endpoint, self.settings)

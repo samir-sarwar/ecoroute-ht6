@@ -2,6 +2,7 @@ name: ecoroute
 
 x-python-service: &python-service
   image: ecoroute-python:latest
+  pull_policy: never
   env_file:
     - path: ../.env
       required: false
@@ -19,8 +20,6 @@ services:
       POSTGRES_USER: ecoroute
       POSTGRES_PASSWORD: ecoroute
       POSTGRES_DB: ecoroute
-    ports:
-      - "127.0.0.1:5432:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
@@ -32,8 +31,6 @@ services:
   redis:
     image: redis:8.0.2-alpine
     command: ["redis-server", "--appendonly", "yes"]
-    ports:
-      - "127.0.0.1:6379:6379"
     volumes:
       - redis-data:/data
     healthcheck:

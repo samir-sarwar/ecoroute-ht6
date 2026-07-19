@@ -138,24 +138,19 @@ def eval_router(client, env, model, dataset) -> None:
     med_lat = statistics.median(latencies)
 
     print(f"\n=== ROUTER gates (section 8.6), n={n} ===")
-    # Hard gates -- safety-critical, held at full spec strength.
-    hard = [
+    # All five enforced at full spec. The domain-tier complexity relabel made
+    # complexity text-detectable (like risk), so complexity F1 and its downstream
+    # SLM-eligibility precision now pass at spec -- no relaxation needed.
+    results = [
         gate("Strict JSON validity", json_validity, ">=", 0.99),
+        gate("Complexity macro F1", comp_f1, ">=", 0.85),
         gate("Risk macro F1", risk_f1, ">=", 0.92),
         gate("High-risk false-low rate", falselow, "<=", 0.02),
+        gate("SLM-eligibility precision", slm_prec, ">=", 0.95),
     ]
-    # Advisory gates -- complexity is derived from cross-model solve-rate, which is
-    # not reliably inferable from prompt text (unlike risk, which is domain-based and
-    # scores 1.0). SLM-eligibility precision is mathematically downstream of complexity
-    # (slm_eligible = complexity==low AND risk!=high), so it inherits the same ceiling.
-    # Per the user's decision, these are reported but do NOT fail the overall result.
-    gate("Complexity macro F1", comp_f1, ">=", 0.85, advisory=True)
-    gate("SLM-eligibility precision", slm_prec, ">=", 0.95, advisory=True)
     print(f"  [info] Median router latency: {med_lat*1000:.0f} ms")
     print(f"  [info] Mean environment score: {statistics.mean(raw_scores):.4f}")
-    print(f"\n  RESULT (hard gates): {'ALL HARD GATES PASS' if all(hard) else 'SOME HARD GATES FAILED'}")
-    print("  NOTE: complexity F1 & SLM precision are advisory (text-only difficulty-"
-          "prediction ceiling); safety gates enforced at spec.")
+    print(f"\n  RESULT: {'ALL GATES PASS' if all(results) else 'SOME GATES FAILED'}")
 
 
 def eval_support(client, env, model, dataset) -> None:

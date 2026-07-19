@@ -22,6 +22,26 @@ def _read_value(path: Path) -> str | None:
         return None
 
 
+def _process_identity(pid: int) -> int:
+    """Return a stable process-start identity suitable for PID reuse checks.
+
+    On Linux, psutil's ``create_time()`` is derived from wall-clock boot time.
+    WSL2 may resynchronise that clock while a process is alive, which caused the
+    same process to be falsely rejected as a reused PID.  Field 22 of
+    ``/proc/<pid>/stat`` is the process start time in kernel clock ticks and is
+    immutable for the lifetime of that process.
+
+    Keep a millisecond create-time fallback for non-Linux/unit-test contexts.
+    """
+    try:
+        # The parenthesized command name may itself contain spaces, so split
+        # after its final ')' before selecting field 22 (index 19 from field 3).
+        stat_tail = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+        return int(stat_tail[19])
+    except (OSError, IndexError, ValueError):
+        return int(round(psutil.Process(pid).create_time() * 1000))
+
+
 class CgroupV2Control:
     name = "cgroups_v2"
 
@@ -40,11 +60,12 @@ class CgroupV2Control:
         self.allow_hard_quota = allow_hard_quota
 
     @staticmethod
-    def _validate_pids(values: list[int]) -> dict[int, float]:
-        result: dict[int, float] = {}
+    def _validate_pids(values: list[int]) -> dict[int, int]:
+        result: dict[int, int] = {}
         for pid in values:
-            process = psutil.Process(pid)
-            result[pid] = process.create_time()
+            # Resolve the process first so missing PIDs fail during startup.
+            psutil.Process(pid)
+            result[pid] = _process_identity(pid)
         return result
 
     @staticmethod
@@ -82,8 +103,8 @@ class CgroupV2Control:
             ),
         }
 
-    def _check_pid(self, pid: int, started: float) -> None:
-        if abs(psutil.Process(pid).create_time() - started) > 0.001:
+    def _check_pid(self, pid: int, started: int) -> None:
+        if _process_identity(pid) != started:
             raise RuntimeError(f"PID {pid} was reused")
 
     def apply(self, plan: dict[str, Any]) -> dict[str, Any]:
@@ -162,7 +183,7 @@ class NiceIoniceControl:
     name = "nice_ionice"
 
     def __init__(self, pids: list[int]) -> None:
-        self.pids = {pid: psutil.Process(pid).create_time() for pid in pids}
+        self.pids = {pid: _process_identity(pid) for pid in pids}
 
     def snapshot(self) -> dict[str, Any]:
         snapshot: dict[str, Any] = {}
@@ -191,7 +212,7 @@ class NiceIoniceControl:
             return {"passed": True, "changed": False}
         for pid, started in self.pids.items():
             process: Any = psutil.Process(pid)
-            if abs(process.create_time() - started) > 0.001:
+            if _process_identity(pid) != started:
                 raise RuntimeError(f"PID {pid} was reused")
             # Only lower background priority; never raise it above the original value.
             process.nice(max(int(process.nice()), int(plan["nice"])))
@@ -215,7 +236,7 @@ class NiceIoniceControl:
             if not psutil.pid_exists(pid):
                 continue
             process: Any = psutil.Process(pid)
-            if abs(process.create_time() - float(value["create_time"])) > 0.001:
+            if _process_identity(pid) != int(value["create_time"]):
                 continue
             process.nice(int(value["nice"]))
             ionice = value.get("ionice", [])

@@ -55,7 +55,7 @@ class Settings(BaseSettings):
         "auto", validation_alias="ECOROUTE_CARBON_PROVIDER"
     )
     ollama_base_url: str = Field(
-        "http://host.docker.internal:11434/v1", validation_alias="OLLAMA_BASE_URL"
+        "http://host.docker.internal:11434", validation_alias="OLLAMA_BASE_URL"
     )
     vllm_base_url: str = Field("", validation_alias="VLLM_BASE_URL")
     hf_token: str = Field("", validation_alias="HF_TOKEN")

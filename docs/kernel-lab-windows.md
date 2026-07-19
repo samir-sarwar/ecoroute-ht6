@@ -78,6 +78,36 @@ The benchmark takes about 70 seconds. Check status or stop the CPU-heavy backgro
 ./scripts/kernel-lab-wsl down
 ```
 
+### Optional real-LLM benchmark with Ollama
+
+The default benchmark target is deterministic CPU work. To benchmark an actual local model,
+install Ollama inside WSL (not the Windows Ollama application) so the Linux cgroup controls apply
+to the real model-runner process:
+
+```bash
+curl -fsSL https://ollama.com/install.sh | sh
+```
+
+Set these non-secret values in the repository `.env`:
+
+```dotenv
+ECOROUTE_KERNEL_LAB_BACKEND=ollama
+ECOROUTE_KERNEL_LAB_OLLAMA_MODEL=llama3.2:1b
+```
+
+Then rebuild and run the same workflow:
+
+```bash
+./scripts/kernel-lab-wsl down
+./scripts/kernel-lab-wsl up
+./scripts/kernel-lab-wsl demo
+```
+
+`up` configures Ollama for WSL/Docker access, pulls and preloads the selected model, records the
+runner PID as the inference workload, and registers its OpenAI-compatible endpoint. Local Ollama
+does not require an API key. The model download requires internet access and approximately 1.5 GB
+of additional disk space for `llama3.2:1b`.
+
 If the repository remains on the Windows filesystem, the same actions can be launched from
 PowerShell:
 
@@ -94,5 +124,6 @@ The result shows measured baseline-versus-optimized latency, throughput, inferen
 time, cgroup `cpu.stat` throttling, and the apply/verify/rollback transaction. It proves the policy
 changed real WSL2 Linux scheduling behavior under controlled contention.
 
-WSL2 normally does not expose physical package-energy counters. The UI therefore reports energy as
-`unavailable`; do not present this run as measured electricity or battery savings.
+WSL2 normally does not expose physical package-energy counters. Energy remains unavailable unless
+the Windows Libre Hardware Monitor integration is enabled. When enabled, the benchmark reports
+measured CPU-package energy; it does not claim whole-laptop electricity or battery savings.

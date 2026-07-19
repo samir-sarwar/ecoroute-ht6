@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import math
 import os
 import platform
 import signal
@@ -18,7 +19,11 @@ import httpx
 import psutil
 from ecoroute.db.base import uuid7
 
-from ecoroute_agent.collectors import SystemCollector, detect_capabilities
+from ecoroute_agent.collectors import (
+    LibreHardwareMonitorPowerSampler,
+    SystemCollector,
+    detect_capabilities,
+)
 from ecoroute_agent.controls import (
     CgroupV2Control,
     ControlTransaction,
@@ -176,6 +181,55 @@ def _counter_delta(before: dict[str, int], after: dict[str, int]) -> dict[str, i
     }
 
 
+async def _grid_carbon_reading(
+    client: httpx.AsyncClient,
+    base_url: str,
+    headers: dict[str, str],
+) -> dict[str, Any] | None:
+    zone = os.getenv("ECOROUTE_BENCHMARK_GRID_ZONE", "").strip()
+    if not zone:
+        return None
+    try:
+        response = await client.get(f"{base_url}/api/v1/carbon/zones", headers=headers)
+        response.raise_for_status()
+        payload = response.json()
+    except (httpx.HTTPError, ValueError, TypeError):
+        return None
+    for item in payload.get("items", []):
+        if str(item.get("zone", "")).casefold() != zone.casefold():
+            continue
+        intensity = item.get("intensityGco2Kwh", item.get("intensity_gco2_kwh"))
+        try:
+            value = float(intensity)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(value) and value >= 0:
+            return {
+                "zone": zone,
+                "intensity_gco2_kwh": value,
+                "source": item.get("source"),
+                "evidence": item.get("evidence"),
+                "observed_at": item.get("observedAt", item.get("observed_at")),
+            }
+    return None
+
+
+async def _post_benchmark_sample(
+    client: httpx.AsyncClient,
+    url: str,
+    headers: dict[str, str],
+    prompt_id: str,
+) -> httpx.Response:
+    for attempt in range(3):
+        try:
+            return await client.post(url, headers=headers, json={"promptId": prompt_id})
+        except httpx.TransportError:
+            if attempt == 2:
+                raise
+            await asyncio.sleep(0.1 * (attempt + 1))
+    raise RuntimeError("unreachable benchmark retry state")
+
+
 async def _benchmark_phase(
     client: httpx.AsyncClient,
     base_url: str,
@@ -187,6 +241,17 @@ async def _benchmark_phase(
     collector: SystemCollector,
     prompt_ids: tuple[str, ...],
 ) -> dict[str, Any]:
+    lhm_url = os.getenv("ECOROUTE_LHM_URL", "").strip()
+    lhm_sampler = (
+        LibreHardwareMonitorPowerSampler(
+            lhm_url,
+            interval_seconds=float(os.getenv("ECOROUTE_LHM_SAMPLE_SECONDS", "0.5")),
+        )
+        if lhm_url
+        else None
+    )
+    lhm_stop = asyncio.Event()
+    lhm_task = asyncio.create_task(lhm_sampler.run(lhm_stop)) if lhm_sampler else None
     before_sample = collector.sample()
     before = _energy_counter_kwh(before_sample)
     process_pids = {
@@ -202,25 +267,36 @@ async def _benchmark_phase(
     started = asyncio.get_running_loop().time()
     results: list[dict[str, Any]] = []
     batch_index = 0
-    while asyncio.get_running_loop().time() - started < duration_seconds:
-        responses = await asyncio.gather(
-            *(
-                client.post(
-                    f"{base_url}/api/v1/agents/{agent_id}/benchmarks/{benchmark_id}/sample",
-                    headers=headers,
-                    json={"promptId": prompt_ids[(batch_index + index) % len(prompt_ids)]},
+    try:
+        while asyncio.get_running_loop().time() - started < duration_seconds:
+            responses = await asyncio.gather(
+                *(
+                    _post_benchmark_sample(
+                        client,
+                        f"{base_url}/api/v1/agents/{agent_id}/benchmarks/{benchmark_id}/sample",
+                        headers,
+                        prompt_ids[(batch_index + index) % len(prompt_ids)],
+                    )
+                    for index in range(concurrency)
                 )
-                for index in range(concurrency)
             )
-        )
-        for response in responses:
-            response.raise_for_status()
-            results.append(response.json())
-        batch_index += concurrency
+            for response in responses:
+                response.raise_for_status()
+                results.append(response.json())
+            batch_index += concurrency
+    finally:
+        if lhm_task is not None:
+            lhm_stop.set()
+            try:
+                await lhm_task
+            except Exception as exc:  # The benchmark remains valid without optional energy data.
+                lhm_sampler.last_error = f"{type(exc).__name__}: {exc}"
     elapsed = max(0.001, asyncio.get_running_loop().time() - started)
     after_sample = collector.sample()
     after = _energy_counter_kwh(after_sample)
-    energy = max(0.0, after - before) if before is not None and after is not None else None
+    counter_energy = max(0.0, after - before) if before is not None and after is not None else None
+    lhm_energy = lhm_sampler.energy_kwh if lhm_sampler else None
+    energy = counter_energy if counter_energy is not None else lhm_energy
     process_cpu = {
         name: round(max(0.0, _process_cpu_seconds(pids) - before_process_cpu[name]), 6)
         for name, pids in process_pids.items()
@@ -234,6 +310,8 @@ async def _benchmark_phase(
         energy_sources.append("rapl")
     if any(device.get("total_energy_mj") is not None for device in after_sample.get("gpu", [])):
         energy_sources.append("nvml-total-energy")
+    if counter_energy is None and lhm_energy is not None:
+        energy_sources.append("libre-hardware-monitor:cpu-package")
     successful = [item for item in results if item.get("success")]
     latencies = [float(item.get("latencyMs", 0)) for item in successful]
     total_tokens = sum(
@@ -243,6 +321,12 @@ async def _benchmark_phase(
         sum(float(item.get("qualityScore", 0)) for item in results) / len(results)
         if results
         else 0.0
+    )
+    carbon_reading = await _grid_carbon_reading(client, base_url, headers)
+    carbon_grams = (
+        energy * carbon_reading["intensity_gco2_kwh"]
+        if energy is not None and carbon_reading is not None
+        else None
     )
     return {
         "successful_throughput_rps": round(len(successful) / elapsed, 4),
@@ -254,6 +338,16 @@ async def _benchmark_phase(
         "energy_per_token_kwh": round(energy / total_tokens, 15)
         if energy is not None and total_tokens
         else None,
+        "energy_kwh": round(energy, 12) if energy is not None else None,
+        "average_power_watts": (
+            round(lhm_sampler.average_power_watts, 3)
+            if lhm_sampler and lhm_sampler.average_power_watts is not None
+            else None
+        ),
+        "energy_sample_count": len(lhm_sampler.samples) if lhm_sampler else 0,
+        "energy_error": lhm_sampler.last_error if lhm_sampler and energy is None else None,
+        "carbon_emissions_g": round(carbon_grams, 9) if carbon_grams is not None else None,
+        "grid_carbon": carbon_reading,
         "quality_score": round(quality, 4),
         "request_count": len(results),
         "successful_requests": len(successful),
@@ -398,6 +492,7 @@ async def _run_assigned_benchmark(
                 "result": {
                     "benchmarkId": benchmark_id,
                     "error": type(exc).__name__,
+                    "errorDetail": str(exc)[:500],
                     "evidence": "measured",
                 },
             },

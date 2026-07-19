@@ -1,6 +1,10 @@
 from pathlib import Path
 
 import pytest
+from ecoroute_agent.collectors.libre_hardware_monitor import (
+    LibreHardwareMonitorPowerSampler,
+    cpu_package_power_watts,
+)
 from ecoroute_agent.collectors.system import RaplCollector, _RaplCounter
 from ecoroute_agent.controls import host
 from ecoroute_agent.controls.host import (
@@ -11,6 +15,31 @@ from ecoroute_agent.controls.host import (
 from ecoroute_agent.controls.transaction import ControlTransaction, SimulatorProfileControl
 from ecoroute_agent.real_main import _energy_counter_kwh
 from ecoroute_agent.simulator import SimulatorModel
+
+
+def test_extracts_cpu_package_power_from_lhm_tree() -> None:
+    payload = {
+        "Children": [
+            {
+                "Text": "Powers",
+                "Children": [
+                    {
+                        "Text": "CPU Package",
+                        "Value": "36.7 W",
+                        "SensorId": "/intelcpu/0/power/0",
+                    }
+                ],
+            }
+        ]
+    }
+    assert cpu_package_power_watts(payload) == 36.7
+
+
+def test_integrates_lhm_power_samples_to_kwh() -> None:
+    sampler = LibreHardwareMonitorPowerSampler("http://localhost/data.json")
+    sampler.samples = [(10.0, 36.0), (20.0, 36.0)]
+    assert sampler.energy_kwh == pytest.approx(0.0001)
+    assert sampler.average_power_watts == pytest.approx(36.0)
 
 
 def test_simulator_never_claims_measured() -> None:

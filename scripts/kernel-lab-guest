@@ -41,6 +41,73 @@ endpoint_id() {
     | head -n 1
 }
 
+env_value() {
+  local name="$1"
+  local fallback="$2"
+  local value=""
+  if [[ -f "$repo_root/.env" ]]; then
+    value="$(sed -n "s/^${name}=//p" "$repo_root/.env" | tail -n 1 | tr -d '\r')"
+    value="${value%\"}"
+    value="${value#\"}"
+  fi
+  printf '%s' "${value:-$fallback}"
+}
+
+ollama_runner_pids() {
+  # Ollama runner naming varies by release. Newer Linux builds launch the
+  # loaded model as `llama-server`; older builds include `ollama` and
+  # `runner` in the command line.
+  ps -eo pid=,comm=,args= | awk '
+    $2 == "llama-server" || ($2 == "ollama" && $0 ~ /runner/) { print $1 }
+  ' | sort -un | paste -sd, -
+}
+
+prepare_ollama() {
+  local model="$1"
+  if ! command -v ollama >/dev/null 2>&1; then
+    cat >&2 <<'EOF'
+Ollama is not installed inside WSL.
+Install it from the WSL terminal with:
+  curl -fsSL https://ollama.com/install.sh | sh
+Then rerun ./scripts/kernel-lab-wsl up.
+EOF
+    exit 1
+  fi
+  if ! systemctl cat ollama.service >/dev/null 2>&1; then
+    echo "The Ollama systemd service is unavailable; reinstall Ollama inside WSL." >&2
+    exit 1
+  fi
+  install -d -m 0755 /etc/systemd/system/ollama.service.d
+  cat >/etc/systemd/system/ollama.service.d/ecoroute-kernel-lab.conf <<'EOF'
+[Service]
+Environment="OLLAMA_HOST=0.0.0.0:11434"
+Environment="OLLAMA_KEEP_ALIVE=10m"
+EOF
+  systemctl daemon-reload
+  systemctl enable --now ollama.service
+  systemctl restart ollama.service
+  wait_for_url "http://127.0.0.1:11434/api/tags" 45
+  echo "Pulling real kernel-lab model $model (already-downloaded layers are reused)..."
+  ollama pull "$model"
+  curl --fail --silent --show-error \
+    -H 'Content-Type: application/json' \
+    --data "$(jq -n --arg model "$model" '{
+      model: $model,
+      messages: [{role: "user", content: "Reply with exactly: ready"}],
+      stream: false,
+      keep_alive: "10m",
+      options: {temperature: 0, num_predict: 8}
+    }')" \
+    http://127.0.0.1:11434/api/chat \
+    | jq -e '.message.content | type == "string" and length > 0' >/dev/null
+  for _ in {1..30}; do
+    [[ -n "$(ollama_runner_pids)" ]] && return
+    sleep 1
+  done
+  echo "Ollama loaded the model but no runner PID was detected." >&2
+  exit 1
+}
+
 install_docker_engine() {
   if command -v dockerd >/dev/null 2>&1 && \
     docker compose version >/dev/null 2>&1 && \
@@ -111,7 +178,7 @@ install_lab() {
     python3 -m venv /opt/ecoroute-kernel-lab-venv
   fi
   /opt/ecoroute-kernel-lab-venv/bin/pip install --disable-pip-version-check \
-    httpx==0.28.1 psutil==7.2.2 SQLAlchemy==2.0.51
+    httpx==0.28.1 psutil==7.2.2 SQLAlchemy==2.0.51 pgvector==0.5.0
 
   install -m 0644 \
     "$repo_root/services/kernel-lab/systemd/ecoroute-kernel-target.service" \
@@ -131,9 +198,21 @@ start_lab() {
     cp "$repo_root/.env.example" "$repo_root/.env"
   fi
 
-  systemctl restart ecoroute-kernel-target.service
+  local backend
+  local ollama_model
+  backend="$(env_value ECOROUTE_KERNEL_LAB_BACKEND synthetic)"
+  ollama_model="$(env_value ECOROUTE_KERNEL_LAB_OLLAMA_MODEL llama3.2:1b)"
+  if [[ "$backend" == "ollama" ]]; then
+    prepare_ollama "$ollama_model"
+    systemctl stop ecoroute-kernel-target.service 2>/dev/null || true
+  elif [[ "$backend" == "synthetic" ]]; then
+    systemctl restart ecoroute-kernel-target.service
+    wait_for_url "http://127.0.0.1:9100/healthz" 30
+  else
+    echo "ECOROUTE_KERNEL_LAB_BACKEND must be synthetic or ollama" >&2
+    exit 1
+  fi
   systemctl restart ecoroute-kernel-background.service
-  wait_for_url "http://127.0.0.1:9100/healthz" 30
   for _ in {1..30}; do
     [[ -s /run/ecoroute-kernel-lab/background.pids ]] && break
     sleep 1
@@ -145,9 +224,22 @@ start_lab() {
 
   local inference_pid
   local background_pids
-  inference_pid="$(systemctl show --property MainPID --value ecoroute-kernel-target.service)"
+  local windows_host
+  local lhm_url=""
+  if [[ "$backend" == "ollama" ]]; then
+    inference_pid="$(ollama_runner_pids)"
+  else
+    inference_pid="$(systemctl show --property MainPID --value ecoroute-kernel-target.service)"
+  fi
   background_pids="$(tr -d '[:space:]' </run/ecoroute-kernel-lab/background.pids)"
-  if [[ "$inference_pid" == "0" || -z "$background_pids" ]]; then
+  windows_host="$(ip route show default | awk 'NR == 1 {print $3}')"
+  for candidate in "http://127.0.0.1:8085/data.json" "http://${windows_host}:8085/data.json"; do
+    if curl --fail --silent --max-time 2 "$candidate" >/dev/null 2>&1; then
+      lhm_url="$candidate"
+      break
+    fi
+  done
+  if [[ "$inference_pid" == "0" || -z "$inference_pid" || -z "$background_pids" ]]; then
     echo "Kernel workload PIDs are unavailable" >&2
     exit 1
   fi
@@ -163,7 +255,17 @@ start_lab() {
     printf 'ECOROUTE_BACKGROUND_PIDS=%s\n' "$background_pids"
     printf 'ECOROUTE_CGROUP_ROOT=/sys/fs/cgroup/ecoroute.slice\n'
     printf 'ECOROUTE_ALLOW_HARD_CPU_QUOTA=true\n'
+    if [[ -n "$lhm_url" ]]; then
+      printf 'ECOROUTE_LHM_URL=%s\n' "$lhm_url"
+      printf 'ECOROUTE_LHM_SAMPLE_SECONDS=0.5\n'
+      printf 'ECOROUTE_BENCHMARK_GRID_ZONE=CA-ON\n'
+    fi
   } >/etc/ecoroute-kernel-lab/agent.env
+  if [[ -n "$lhm_url" ]]; then
+    echo "Libre Hardware Monitor detected at $lhm_url; CPU package energy is enabled."
+  else
+    echo "Libre Hardware Monitor web server was not reachable; energy will remain unavailable."
+  fi
 
   cd "$repo_root"
   docker compose "${compose_files[@]}" up --build -d --wait
@@ -192,16 +294,52 @@ start_lab() {
   local current_agent_id
   local current_endpoint_id
   local endpoint_payload
+  local endpoint_provider
+  local endpoint_base_url
+  local endpoint_model
+  local endpoint_region
+  local endpoint_grid_zone
+  local processing_evidence
+  local grid_attribution
   current_agent_id="$(agent_id)"
   current_endpoint_id="$(endpoint_id)"
-  endpoint_payload="$(jq -n --arg agent "$current_agent_id" '{
+  if [[ "$backend" == "ollama" ]]; then
+    endpoint_provider="ollama"
+    # LiteLLM's native Ollama adapter appends /api/generate itself. Supplying
+    # /v1 here would produce the invalid path /v1/api/generate.
+    endpoint_base_url="http://host.docker.internal:11434"
+    endpoint_model="$ollama_model"
+    endpoint_region="canada-ontario-local"
+    endpoint_grid_zone="CA-ON"
+    processing_evidence="self_hosted"
+    grid_attribution="physical_grid"
+  else
+    endpoint_provider="openai_compatible"
+    endpoint_base_url="http://host.docker.internal:9100/v1"
+    endpoint_model="ecoroute-kernel-lab"
+    endpoint_region="kernel-lab-local"
+    endpoint_grid_zone="kernel-lab-local"
+    processing_evidence="unknown"
+    grid_attribution="unknown"
+  fi
+  endpoint_payload="$(jq -n \
+    --arg agent "$current_agent_id" \
+    --arg provider "$endpoint_provider" \
+    --arg base_url "$endpoint_base_url" \
+    --arg model "$endpoint_model" \
+    --arg region "$endpoint_region" \
+    --arg grid_zone "$endpoint_grid_zone" \
+    --arg processing_evidence "$processing_evidence" \
+    --arg grid_attribution "$grid_attribution" '{
     name: "kernel-lab-cpu",
-    provider: "openai_compatible",
-    baseUrl: "http://host.docker.internal:9100/v1",
+    provider: $provider,
+    baseUrl: $base_url,
     credentialRef: null,
-    physicalModel: "ecoroute-kernel-lab",
-    region: "kernel-lab-local",
-    gridZone: "kernel-lab-local",
+    physicalModel: $model,
+    region: $region,
+    gridZone: $grid_zone,
+    processingLocationEvidence: $processing_evidence,
+    gridAttribution: $grid_attribution,
     qualityTier: "small",
     capabilities: ["text"],
     contextWindowTokens: 4096,
@@ -247,6 +385,8 @@ start_lab() {
   echo "EcoRoute real kernel lab is ready."
   echo "Agent: $current_agent_id"
   echo "Endpoint: $current_endpoint_id"
+  echo "Backend: $backend"
+  [[ "$backend" == "ollama" ]] && echo "Real LLM: $ollama_model"
   echo "Inference PID: $inference_pid"
   echo "Background PIDs: $background_pids"
 }
@@ -255,8 +395,10 @@ run_demo() {
   require_repo
   local current_agent_id
   local current_endpoint_id
+  local backend
   current_agent_id="$(agent_id)"
   current_endpoint_id="$(endpoint_id)"
+  backend="$(env_value ECOROUTE_KERNEL_LAB_BACKEND synthetic)"
   if [[ -z "$current_endpoint_id" ]]; then
     echo "Kernel lab endpoint is not registered; run kernel-lab-up first" >&2
     exit 1
@@ -276,7 +418,11 @@ run_demo() {
     -H "Authorization: Bearer $gateway_key" \
     -H 'Content-Type: application/json' \
     -H "Idempotency-Key: kernel-lab-$(date +%s)" \
-    --data "$(jq -n --arg agent "$current_agent_id" --arg endpoint "$current_endpoint_id" '{
+    --data "$(jq -n \
+      --arg agent "$current_agent_id" \
+      --arg endpoint "$current_endpoint_id" \
+      --argjson concurrency "$([[ "$backend" == "ollama" ]] && echo 1 || echo 2)" \
+      --argjson output_cap "$([[ "$backend" == "ollama" ]] && echo 32 || echo 64)" '{
       agentId: $agent,
       endpointId: $endpoint,
       profile: "eco",
@@ -284,8 +430,8 @@ run_demo() {
       warmupSeconds: 5,
       phaseSeconds: 30,
       cooldownSeconds: 5,
-      concurrency: 2,
-      outputTokenCap: 64
+      concurrency: $concurrency,
+      outputTokenCap: $output_cap
     }')" \
     "$gateway_url/api/v1/benchmarks")"
   benchmark_id="$(jq -r '.id' <<<"$benchmark")"
